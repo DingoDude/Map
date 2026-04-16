@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <title>Space & Earth Control Center</title>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <style>
+        #cesiumContainer { position: absolute; top: 0; left: 0; height: 100vh; width: 100%; margin: 0; overflow: hidden; }
+        
+        /* Kontrolpanel stil */
+        #ui-panel {
+            position: absolute; top: 10px; left: 10px;
+            background: rgba(30, 30, 30, 0.8);
+            color: white; padding: 15px; border-radius: 8px;
+            font-family: sans-serif; z-index: 100; border: 1px solid #444;
+        }
+        #ui-panel h3 { margin: 0 0 10px 0; font-size: 16px; color: #00ffcc; }
+        .layer-item { margin-bottom: 8px; cursor: pointer; display: block; }
+
+        /* Højdemåler stil */
+        #altitude-display {
+            position: absolute; bottom: 30px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.6);
+            color: #00ffcc; padding: 5px 15px;
+            border-radius: 20px; font-family: monospace;
+            font-size: 18px; pointer-events: none; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+
+    
+<div id="ui-panel">
+    <h3>Space Control</h3>
+    <button onclick="flyToSat('iss')">Find ISS</button>
+    <button onclick="flyToSat('tiangong')">Find Tiangong</button>
+    <hr>
+    <h3>Layers</h3>
+    <label class="layer-item"><input type="checkbox" id="toggle-sat" checked> Satellitter</label>
+    <label class="layer-item"><input type="checkbox" id="toggle-quakes" checked> Jordskælv</label>
+    <label class="layer-item"><input type="checkbox" id="toggle-ships" checked> Civil Skibstrafik</label>
+    <label class="layer-item"><input type="checkbox" id="toggle-military" checked> Militær Flåde</label>
+</div>
+
+    <div id="altitude-display">Højde: Henter...</div>
+
+    <div id="cesiumContainer"></div>
+    <script src="script.js"></script>
+</body>
+</html>
