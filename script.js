@@ -2,12 +2,18 @@
 Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI4YWE4MjRkYy0wYTRjLTQ0N2MtYTUyNC1kNGNlY2RkNTFjMjgiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzYzMzI0Njh9.8ZT0_Y4I8w8TVhMqanhTsZXWoL-iZBx0hiS8Q0nhFFc';
 const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
 const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
-const FLIGHT_BOUNDS_QUERY = 'lamin=45.0&lomin=-10.0&lamax=60.0&lomax=20.0';
-const FLIGHT_DATA_PATH = `/api/flights?${FLIGHT_BOUNDS_QUERY}`;
-const FLIGHT_DATA_URLS = [
-    FLIGHT_DATA_PATH,
-    `http://127.0.0.1:5600${FLIGHT_DATA_PATH}`
-];
+const LOCAL_PROXY_ORIGIN = 'http://127.0.0.1:5600';
+const PERSIAN_GULF_VIEW = Cesium.Rectangle.fromDegrees(35.0, 20.0, 60.0, 34.0);
+const FLIGHT_UPDATE_INTERVAL_MS = 60000;
+const FLIGHT_STALE_MS = 180000;
+const FLIGHT_MAX_RESULTS = 160;
+const FLIGHT_VIEW_PADDING_DEGREES = 1.5;
+const FLIGHT_MIN_SCOPE_DEGREES = 1.0;
+const FLIGHT_TRAIL_SECONDS = 180;
+const FLIGHT_SCOPE_GRID_DEGREES = 0.5;
+const FLIGHT_CAMERA_DEBOUNCE_MS = 2000;
+const FLIGHT_MIN_REQUEST_GAP_MS = 30000;
+const FLIGHT_RATE_LIMIT_BACKOFF_MS = 120000;
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
 const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -16,6 +22,12 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
     geocoder: false,
     homeButton: false,
     shouldAnimate: true
+});
+
+viewer.scene.globe.depthTestAgainstTerrain = true;
+
+viewer.camera.setView({
+    destination: PERSIAN_GULF_VIEW
 });
 
 // Lister til styring af lag (Layers)
@@ -86,7 +98,8 @@ function isLayerChecked(id) {
 }
 
 function setMapEntitiesVisible(entities, visible) {
-    entities.forEach(entity => {
+    entities.forEach(item => {
+        const entity = item.entity || item;
         entity.show = visible;
     });
 }
@@ -126,24 +139,126 @@ function createPlaneIcon() {
 const PLANE_ICON = createPlaneIcon();
 
 let selectedSatelliteKey = null;
+let isUpdatingFlights = false;
+let lastFlightRequestAt = 0;
+let flightRateLimitedUntil = 0;
+let pendingFlightTimer = null;
+let lastFlightScopeKey = '';
+
+function clamp(value, min, max) {
+    return Math.min(Math.max(value, min), max);
+}
+
+function snapDown(value, step) {
+    return Math.floor(value / step) * step;
+}
+
+function snapUp(value, step) {
+    return Math.ceil(value / step) * step;
+}
+
+function getFlightScopeQueries() {
+    const rectangle = viewer.camera.computeViewRectangle(viewer.scene.globe.ellipsoid);
+
+    if (!rectangle) {
+        return [''];
+    }
+
+    let west = Cesium.Math.toDegrees(rectangle.west) - FLIGHT_VIEW_PADDING_DEGREES;
+    let east = Cesium.Math.toDegrees(rectangle.east) + FLIGHT_VIEW_PADDING_DEGREES;
+    let south = Cesium.Math.toDegrees(rectangle.south) - FLIGHT_VIEW_PADDING_DEGREES;
+    let north = Cesium.Math.toDegrees(rectangle.north) + FLIGHT_VIEW_PADDING_DEGREES;
+
+    south = clamp(snapDown(south, FLIGHT_SCOPE_GRID_DEGREES), -90, 90);
+    north = clamp(snapUp(north, FLIGHT_SCOPE_GRID_DEGREES), -90, 90);
+
+    if (north - south < FLIGHT_MIN_SCOPE_DEGREES) {
+        const midLat = (north + south) / 2;
+        south = clamp(midLat - FLIGHT_MIN_SCOPE_DEGREES / 2, -90, 90);
+        north = clamp(midLat + FLIGHT_MIN_SCOPE_DEGREES / 2, -90, 90);
+    }
+
+    let width = east - west;
+    if (width < 0) width += 360;
+
+    if (width >= 359) {
+        return [''];
+    }
+
+    if (width < FLIGHT_MIN_SCOPE_DEGREES) {
+        const midLon = west + width / 2;
+        west = midLon - FLIGHT_MIN_SCOPE_DEGREES / 2;
+        east = midLon + FLIGHT_MIN_SCOPE_DEGREES / 2;
+    }
+
+    west = snapDown(west, FLIGHT_SCOPE_GRID_DEGREES);
+    east = snapUp(east, FLIGHT_SCOPE_GRID_DEGREES);
+    west = Cesium.Math.negativePiToPi(Cesium.Math.toRadians(west));
+    east = Cesium.Math.negativePiToPi(Cesium.Math.toRadians(east));
+    west = Cesium.Math.toDegrees(west);
+    east = Cesium.Math.toDegrees(east);
+
+    const makeQuery = (lomin, lomax) => new URLSearchParams({
+        lamin: south.toFixed(4),
+        lomin: lomin.toFixed(4),
+        lamax: north.toFixed(4),
+        lomax: lomax.toFixed(4)
+    }).toString();
+
+    if (west <= east) {
+        return [makeQuery(west, east)];
+    }
+
+    return [
+        makeQuery(west, 180),
+        makeQuery(-180, east)
+    ];
+}
+
+function buildFlightDataUrls() {
+    const queries = getFlightScopeQueries();
+    const localOrigin = window.location.port === '5600' ? '' : LOCAL_PROXY_ORIGIN;
+    return queries.map(query => `${localOrigin}/api/flights${query ? `?${query}` : ''}`);
+}
+
+function scheduleFlightUpdate(delayMs = FLIGHT_CAMERA_DEBOUNCE_MS) {
+    window.clearTimeout(pendingFlightTimer);
+    pendingFlightTimer = window.setTimeout(() => {
+        updateFlights();
+    }, delayMs);
+}
 
 async function fetchFlightData() {
-    const urls = [...new Set(FLIGHT_DATA_URLS)];
+    const urls = [...new Set(buildFlightDataUrls())];
+    const mergedStates = [];
+    let hasSuccessfulResponse = false;
+    let lastFailure = null;
 
     for (const url of urls) {
         try {
             const response = await fetch(url);
             if (!response.ok) {
                 console.warn('Kunne ikke hente flydata:', response.status, response.statusText, url);
+                lastFailure = new Error(`${response.status} ${response.statusText}`);
+                lastFailure.rateLimited = response.status === 429;
                 continue;
             }
-            return await response.json();
+            const data = await response.json();
+            hasSuccessfulResponse = true;
+            if (Array.isArray(data.states)) {
+                mergedStates.push(...data.states);
+            }
         } catch (e) {
             console.warn('Flydata-kilde fejlede:', url, e);
+            lastFailure = e;
         }
     }
 
-    throw new Error('Ingen flydata-kilder svarede. Start proxyen med: node server.js');
+    if (hasSuccessfulResponse) {
+        return { states: mergedStates };
+    }
+
+    throw lastFailure || new Error('Ingen flydata-kilder svarede. Start proxyen med: node server.js');
 }
 
 function addSatelliteSample(sat, time, position, telemetry) {
@@ -340,12 +455,30 @@ function connectAIS() {
 
 async function updateFlights() {
     if (!isLayerChecked('toggle-planes')) return;
+    if (isUpdatingFlights) return;
+    const nowMs = Date.now();
+    if (nowMs < flightRateLimitedUntil) return;
+
+    const scopeKey = getFlightScopeQueries().join('|');
+    const scopeChanged = scopeKey !== lastFlightScopeKey;
+    const requestGap = nowMs - lastFlightRequestAt;
+    if (!scopeChanged && requestGap < FLIGHT_MIN_REQUEST_GAP_MS) return;
+    if (scopeChanged && requestGap < FLIGHT_MIN_REQUEST_GAP_MS) {
+        scheduleFlightUpdate(FLIGHT_MIN_REQUEST_GAP_MS - requestGap);
+        return;
+    }
+
+    isUpdatingFlights = true;
+    lastFlightRequestAt = nowMs;
+    lastFlightScopeKey = scopeKey;
 
     try {
         const data = await fetchFlightData();
         if (!Array.isArray(data.states)) return;
+        const now = Cesium.JulianDate.now();
+        const seenFlights = new Set();
 
-        data.states.slice(0, 80).forEach(flight => {
+        data.states.slice(0, FLIGHT_MAX_RESULTS).forEach(flight => {
             const icao = flight[0];
             const callsign = (flight[1] || icao || 'Ukendt').trim();
             const lon = Number(flight[5]);
@@ -361,6 +494,8 @@ async function updateFlights() {
             const position = Cesium.Cartesian3.fromDegrees(lon, lat, Math.max(altitude, 0));
             if (!hasValidCartesian(position)) return;
 
+            seenFlights.add(icao);
+
             const description = [
                 'Live flytrafik',
                 `Callsign: ${callsign}`,
@@ -371,24 +506,36 @@ async function updateFlights() {
             ].join('<br>');
 
             if (planeEntities.has(icao)) {
-                const entity = planeEntities.get(icao);
-                entity.position = position;
+                const plane = planeEntities.get(icao);
+                const entity = plane.entity;
+                plane.positionProperty.addSample(now, position);
+                plane.sampleCount += 1;
+                plane.lastSeen = Date.now();
                 entity.show = true;
                 entity.description = description;
                 entity.label.text = callsign;
                 entity.billboard.rotation = hasFiniteNumbers(heading) ? Cesium.Math.toRadians(heading) : 0;
+                entity.path.show = plane.sampleCount >= 2;
                 return;
             }
 
+            const positionProperty = new Cesium.SampledPositionProperty();
+            positionProperty.setInterpolationOptions({
+                interpolationDegree: 1,
+                interpolationAlgorithm: Cesium.LinearApproximation
+            });
+            positionProperty.forwardExtrapolationType = Cesium.ExtrapolationType.HOLD;
+            positionProperty.forwardExtrapolationDuration = 20;
+            positionProperty.addSample(now, position);
+
             const entity = viewer.entities.add({
                 name: `Fly: ${callsign}`,
-                position,
+                position: positionProperty,
                 billboard: {
                     image: PLANE_ICON,
                     scale: 0.45,
                     rotation: hasFiniteNumbers(heading) ? Cesium.Math.toRadians(heading) : 0,
-                    alignedAxis: Cesium.Cartesian3.ZERO,
-                    disableDepthTestDistance: Number.POSITIVE_INFINITY
+                    alignedAxis: Cesium.Cartesian3.ZERO
                 },
                 label: {
                     text: callsign,
@@ -396,12 +543,42 @@ async function updateFlights() {
                     pixelOffset: new Cesium.Cartesian2(0, -14),
                     distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 900000)
                 },
+                path: {
+                    show: false,
+                    resolution: 1,
+                    material: new Cesium.PolylineGlowMaterialProperty({
+                        glowPower: 0.12,
+                        color: Cesium.Color.YELLOW.withAlpha(0.72)
+                    }),
+                    width: 3,
+                    leadTime: 0,
+                    trailTime: FLIGHT_TRAIL_SECONDS
+                },
                 description
             });
-            planeEntities.set(icao, entity);
+            planeEntities.set(icao, {
+                entity,
+                positionProperty,
+                sampleCount: 1,
+                lastSeen: Date.now()
+            });
+        });
+
+        planeEntities.forEach((plane, icao) => {
+            if (seenFlights.has(icao) && Date.now() - plane.lastSeen <= FLIGHT_STALE_MS) {
+                return;
+            }
+
+            viewer.entities.remove(plane.entity);
+            planeEntities.delete(icao);
         });
     } catch (e) {
         console.warn('Fejl ved hentning af flytrafik:', e);
+        if (e && e.rateLimited) {
+            flightRateLimitedUntil = Date.now() + FLIGHT_RATE_LIMIT_BACKOFF_MS;
+        }
+    } finally {
+        isUpdatingFlights = false;
     }
 }
 
@@ -603,9 +780,16 @@ document.getElementById('toggle-ships').addEventListener('change', e => {
 });
 document.getElementById('toggle-planes').addEventListener('change', e => {
     setMapEntitiesVisible(planeEntities, e.target.checked);
+    if (e.target.checked) {
+        scheduleFlightUpdate(0);
+    }
 });
 document.getElementById('toggle-military').addEventListener('change', e => {
     militaryEntities.forEach(ent => ent.show = e.target.checked);
+});
+
+viewer.camera.moveEnd.addEventListener(() => {
+    scheduleFlightUpdate();
 });
 
 // 9. HØJDEMÅLER LOGIK
@@ -620,7 +804,7 @@ initSatellites();
 initEarthquakes();
 initMaritimeLayers();
 connectAIS();
-updateFlights();
+scheduleFlightUpdate(0);
 updateSatelliteData();
 setInterval(updateSatelliteData, 5000);
-setInterval(updateFlights, 15000);
+setInterval(() => scheduleFlightUpdate(0), FLIGHT_UPDATE_INTERVAL_MS);
