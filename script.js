@@ -3,12 +3,16 @@ Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOi
 const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
 const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
 const AIS_RECONNECT_MS = 10000;
-const AIS_SUBSCRIPTION_DEBOUNCE_MS = 2500;
-const AIS_MIN_SUBSCRIPTION_GAP_MS = 5000;
-const AIS_VIEW_PADDING_DEGREES = 0.75;
-const AIS_MAX_LAT_SPAN_DEGREES = 18;
-const AIS_MAX_LON_SPAN_DEGREES = 28;
+const AIS_SUBSCRIPTION_DEBOUNCE_MS = 600;
+const AIS_MIN_SUBSCRIPTION_GAP_MS = 1500;
+const AIS_VIEW_PADDING_DEGREES = 3;
+const AIS_MAX_LAT_SPAN_DEGREES = 45;
+const AIS_MAX_LON_SPAN_DEGREES = 75;
 const AIS_STALE_MS = 10 * 60 * 1000;
+const AIS_CACHE_KEY = 'space-control-live-ais-ships-v1';
+const AIS_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+const AIS_CACHE_WRITE_DEBOUNCE_MS = 2500;
+const AIS_CACHE_MAX_SHIPS = 700;
 const LOCAL_PROXY_ORIGIN = 'http://127.0.0.1:5600';
 const PERSIAN_GULF_VIEW = Cesium.Rectangle.fromDegrees(35.0, 20.0, 60.0, 34.0);
 const FLIGHT_UPDATE_INTERVAL_MS = 60000;
@@ -24,6 +28,7 @@ const FLIGHT_RATE_LIMIT_BACKOFF_MS = 120000;
 const FLIGHT_GREEN_ALTITUDE_M = 10000;
 const FLIGHT_BLUE_ALTITUDE_M = 15000;
 const PLANE_ICON_HEADING_OFFSET_RADIANS = Cesium.Math.PI_OVER_TWO;
+const SHIP_ICON_HEADING_OFFSET_RADIANS = Cesium.Math.PI_OVER_TWO;
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
 const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -186,26 +191,58 @@ const PLANE_ICON = createPlaneIcon();
 
 function createShipIcon() {
     const canvas = document.createElement('canvas');
-    canvas.width = 48;
-    canvas.height = 48;
+    canvas.width = 72;
+    canvas.height = 72;
     const ctx = canvas.getContext('2d');
-    ctx.translate(24, 24);
-    ctx.fillStyle = '#1e9bff';
-    ctx.strokeStyle = '#07345c';
-    ctx.lineWidth = 2;
+    ctx.translate(36, 36);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.fillStyle = '#d8f5ff';
+    ctx.strokeStyle = '#5f3718';
+    ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(0, -20);
-    ctx.lineTo(13, -7);
-    ctx.lineTo(10, 14);
-    ctx.lineTo(0, 22);
-    ctx.lineTo(-10, 14);
-    ctx.lineTo(-13, -7);
+    ctx.moveTo(0, -25);
+    ctx.lineTo(0, 10);
+    ctx.stroke();
+
+    ctx.fillStyle = '#f7efe0';
+    ctx.beginPath();
+    ctx.moveTo(2, -22);
+    ctx.lineTo(20, 1);
+    ctx.lineTo(2, 5);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = '#d8f5ff';
-    ctx.fillRect(-5, -4, 10, 12);
-    ctx.strokeRect(-5, -4, 10, 12);
+
+    ctx.fillStyle = '#fff7e8';
+    ctx.beginPath();
+    ctx.moveTo(-2, -18);
+    ctx.lineTo(-18, 4);
+    ctx.lineTo(-2, 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#8b4f24';
+    ctx.strokeStyle = '#4b2a13';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(-25, 10);
+    ctx.quadraticCurveTo(0, 25, 25, 10);
+    ctx.lineTo(16, 20);
+    ctx.quadraticCurveTo(0, 29, -16, 20);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = '#f3d6a0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-14, 17);
+    ctx.lineTo(14, 17);
+    ctx.stroke();
+
     return canvas.toDataURL();
 }
 
@@ -222,6 +259,7 @@ let aisReconnectTimer = null;
 let aisSubscriptionTimer = null;
 let aisLastSubscriptionAt = 0;
 let aisLastScopeKey = '';
+let aisCacheWriteTimer = null;
 const shipStaticByMmsi = new Map();
 
 function clamp(value, min, max) {
@@ -502,7 +540,42 @@ function getPlaneBillboardRotation(headingDegrees) {
 
 function getBillboardRotationFromHeading(headingDegrees) {
     if (!hasFiniteNumbers(headingDegrees)) return 0;
-    return Cesium.Math.toRadians(Number(headingDegrees));
+    return Cesium.Math.toRadians(Number(headingDegrees)) - SHIP_ICON_HEADING_OFFSET_RADIANS;
+}
+
+function createLiveShipEntity({ mmsi, name, lon, lat, course, description, lastSeen }) {
+    const position = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
+    if (!hasValidCartesian(position)) return null;
+
+    const entity = viewer.entities.add({
+        name,
+        position,
+        billboard: {
+            image: SHIP_ICON,
+            scale: 0.42,
+            rotation: getBillboardRotationFromHeading(course),
+            alignedAxis: Cesium.Cartesian3.ZERO
+        },
+        label: {
+            text: name,
+            font: '9pt sans-serif',
+            pixelOffset: new Cesium.Cartesian2(0, -14),
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 800000)
+        },
+        description
+    });
+
+    liveShipEntities.set(mmsi, {
+        entity,
+        lastSeen,
+        lat,
+        lon,
+        course,
+        name,
+        description
+    });
+
+    return entity;
 }
 
 function setText(id, text) {
@@ -639,37 +712,97 @@ function upsertAisShip(aisData) {
         ship.entity.label.text = name;
         ship.entity.billboard.rotation = getBillboardRotationFromHeading(course);
         ship.lastSeen = Date.now();
+        ship.lat = lat;
+        ship.lon = lon;
+        ship.course = course;
+        ship.name = name;
+        ship.description = description;
+        scheduleAisCacheWrite();
         return;
     }
 
-    const entity = viewer.entities.add({
+    createLiveShipEntity({
+        mmsi,
         name,
-        position,
-        billboard: {
-            image: SHIP_ICON,
-            scale: 0.55,
-            rotation: getBillboardRotationFromHeading(course),
-            alignedAxis: Cesium.Cartesian3.ZERO
-        },
-        label: {
-            text: name,
-            font: '9pt sans-serif',
-            pixelOffset: new Cesium.Cartesian2(0, -14),
-            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 800000)
-        },
-        description
+        lon,
+        lat,
+        course,
+        description,
+        lastSeen: Date.now()
     });
-    liveShipEntities.set(mmsi, { entity, lastSeen: Date.now() });
+    scheduleAisCacheWrite();
 }
 
 function cleanupStaleAisShips() {
     const now = Date.now();
+    let removedAny = false;
     liveShipEntities.forEach((ship, mmsi) => {
         if (now - ship.lastSeen <= AIS_STALE_MS) return;
         viewer.entities.remove(ship.entity);
         liveShipEntities.delete(mmsi);
         shipStaticByMmsi.delete(mmsi);
+        removedAny = true;
     });
+    if (removedAny) {
+        scheduleAisCacheWrite();
+    }
+}
+
+function scheduleAisCacheWrite() {
+    window.clearTimeout(aisCacheWriteTimer);
+    aisCacheWriteTimer = window.setTimeout(writeAisShipCache, AIS_CACHE_WRITE_DEBOUNCE_MS);
+}
+
+function writeAisShipCache() {
+    try {
+        const now = Date.now();
+        const ships = Array.from(liveShipEntities.entries())
+            .map(([mmsi, ship]) => ({
+                mmsi,
+                lastSeen: ship.lastSeen,
+                lat: ship.lat,
+                lon: ship.lon,
+                course: ship.course,
+                name: ship.name,
+                description: ship.description
+            }))
+            .filter(ship => now - ship.lastSeen <= AIS_CACHE_MAX_AGE_MS && hasFiniteNumbers(ship.lat, ship.lon))
+            .sort((a, b) => b.lastSeen - a.lastSeen)
+            .slice(0, AIS_CACHE_MAX_SHIPS);
+
+        localStorage.setItem(AIS_CACHE_KEY, JSON.stringify(ships));
+    } catch (e) {
+        console.warn('Kunne ikke gemme AIS-cache:', e);
+    }
+}
+
+function restoreAisShipCache() {
+    try {
+        const raw = localStorage.getItem(AIS_CACHE_KEY);
+        if (!raw) return;
+
+        const now = Date.now();
+        const ships = JSON.parse(raw);
+        if (!Array.isArray(ships)) return;
+
+        ships.forEach(ship => {
+            if (!ship.mmsi || !hasFiniteNumbers(ship.lat, ship.lon) || now - Number(ship.lastSeen) > AIS_CACHE_MAX_AGE_MS) {
+                return;
+            }
+
+            createLiveShipEntity({
+                mmsi: ship.mmsi,
+                name: ship.name || `Vessel ${ship.mmsi}`,
+                lon: Number(ship.lon),
+                lat: Number(ship.lat),
+                course: Number(ship.course),
+                description: ship.description || `Cached AIS<br>MMSI: ${ship.mmsi}`,
+                lastSeen: Number(ship.lastSeen)
+            });
+        });
+    } catch (e) {
+        console.warn('Kunne ikke laese AIS-cache:', e);
+    }
 }
 
 async function parseWebSocketJsonMessage(data) {
@@ -1272,6 +1405,7 @@ viewer.scene.postRender.addEventListener(() => {
 initSatellites();
 initEarthquakes();
 initMaritimeLayers();
+restoreAisShipCache();
 connectAIS();
 scheduleFlightUpdate(0);
 updateSatelliteData();
