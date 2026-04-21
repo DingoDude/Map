@@ -1,7 +1,14 @@
 // 1. DIN CESIUM ION TOKEN
-Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI4YWE4MjRkYy0wYTRjLTQ0N2MtYTUyNC1kNGNlY2RkNTFjMjgiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzYzMzI0Njh9.8ZT0_Y4I8w8TVhMqanhTsZXWoL-iZBx0hiS8Q0nhFFc';
+Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI5NTBiY2Q0NS02ZDc4LTRkOWEtYmIzYS0yZDdmM2MzMGU3NmIiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzY3NzIzODR9.pGxmdND27nVBk6Wi2I4t_dUYq1ytFnbmYnwLH53Vnro';
 const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
 const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
+const AIS_RECONNECT_MS = 10000;
+const AIS_SUBSCRIPTION_DEBOUNCE_MS = 2500;
+const AIS_MIN_SUBSCRIPTION_GAP_MS = 5000;
+const AIS_VIEW_PADDING_DEGREES = 0.75;
+const AIS_MAX_LAT_SPAN_DEGREES = 18;
+const AIS_MAX_LON_SPAN_DEGREES = 28;
+const AIS_STALE_MS = 10 * 60 * 1000;
 const LOCAL_PROXY_ORIGIN = 'http://127.0.0.1:5600';
 const PERSIAN_GULF_VIEW = Cesium.Rectangle.fromDegrees(35.0, 20.0, 60.0, 34.0);
 const FLIGHT_UPDATE_INTERVAL_MS = 60000;
@@ -14,6 +21,9 @@ const FLIGHT_SCOPE_GRID_DEGREES = 0.5;
 const FLIGHT_CAMERA_DEBOUNCE_MS = 2000;
 const FLIGHT_MIN_REQUEST_GAP_MS = 30000;
 const FLIGHT_RATE_LIMIT_BACKOFF_MS = 120000;
+const FLIGHT_GREEN_ALTITUDE_M = 10000;
+const FLIGHT_BLUE_ALTITUDE_M = 15000;
+const PLANE_ICON_HEADING_OFFSET_RADIANS = Cesium.Math.PI_OVER_TWO;
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
 const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -104,6 +114,42 @@ function setMapEntitiesVisible(entities, visible) {
     });
 }
 
+function getEntityPosition(entity) {
+    if (!entity || !entity.position) return null;
+
+    if (typeof entity.position.getValue === 'function') {
+        return entity.position.getValue(viewer.clock.currentTime);
+    }
+
+    return entity.position;
+}
+
+function isEntityOnVisibleSide(entity, occluder) {
+    const position = getEntityPosition(entity);
+    return hasValidCartesian(position) && occluder.isPointVisible(position);
+}
+
+function setScopedEntityVisibility(entities, visible, occluder) {
+    entities.forEach(item => {
+        const entity = item.entity || item;
+        entity.show = visible && isEntityOnVisibleSide(entity, occluder);
+    });
+}
+
+function applyVisibleSideScope() {
+    const occluder = new Cesium.EllipsoidalOccluder(
+        viewer.scene.globe.ellipsoid,
+        viewer.camera.positionWC
+    );
+
+    setScopedEntityVisibility(satelliteEntities, isLayerChecked('toggle-sat'), occluder);
+    setScopedEntityVisibility(quakeEntities, isLayerChecked('toggle-quakes'), occluder);
+    setScopedEntityVisibility(shipEntities, isLayerChecked('toggle-ships'), occluder);
+    setScopedEntityVisibility(liveShipEntities, isLayerChecked('toggle-ship-traffic'), occluder);
+    setScopedEntityVisibility(planeEntities, isLayerChecked('toggle-planes'), occluder);
+    setScopedEntityVisibility(militaryEntities, isLayerChecked('toggle-military'), occluder);
+}
+
 function createPlaneIcon() {
     const canvas = document.createElement('canvas');
     canvas.width = 48;
@@ -138,12 +184,45 @@ function createPlaneIcon() {
 
 const PLANE_ICON = createPlaneIcon();
 
+function createShipIcon() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 48;
+    canvas.height = 48;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(24, 24);
+    ctx.fillStyle = '#1e9bff';
+    ctx.strokeStyle = '#07345c';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -20);
+    ctx.lineTo(13, -7);
+    ctx.lineTo(10, 14);
+    ctx.lineTo(0, 22);
+    ctx.lineTo(-10, 14);
+    ctx.lineTo(-13, -7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#d8f5ff';
+    ctx.fillRect(-5, -4, 10, 12);
+    ctx.strokeRect(-5, -4, 10, 12);
+    return canvas.toDataURL();
+}
+
+const SHIP_ICON = createShipIcon();
+
 let selectedSatelliteKey = null;
 let isUpdatingFlights = false;
 let lastFlightRequestAt = 0;
 let flightRateLimitedUntil = 0;
 let pendingFlightTimer = null;
 let lastFlightScopeKey = '';
+let aisSocket = null;
+let aisReconnectTimer = null;
+let aisSubscriptionTimer = null;
+let aisLastSubscriptionAt = 0;
+let aisLastScopeKey = '';
+const shipStaticByMmsi = new Map();
 
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
@@ -226,6 +305,75 @@ function scheduleFlightUpdate(delayMs = FLIGHT_CAMERA_DEBOUNCE_MS) {
     pendingFlightTimer = window.setTimeout(() => {
         updateFlights();
     }, delayMs);
+}
+
+function limitAisSpan(south, west, north, east) {
+    const latSpan = north - south;
+    const lonSpan = east - west;
+    const midLat = (south + north) / 2;
+    const midLon = (west + east) / 2;
+    const limitedLatSpan = Math.min(latSpan, AIS_MAX_LAT_SPAN_DEGREES);
+    const limitedLonSpan = Math.min(lonSpan, AIS_MAX_LON_SPAN_DEGREES);
+
+    return {
+        south: clamp(midLat - limitedLatSpan / 2, -90, 90),
+        west: clamp(midLon - limitedLonSpan / 2, -180, 180),
+        north: clamp(midLat + limitedLatSpan / 2, -90, 90),
+        east: clamp(midLon + limitedLonSpan / 2, -180, 180)
+    };
+}
+
+function getAisBoundingBoxes() {
+    const rectangle = viewer.camera.computeViewRectangle(viewer.scene.globe.ellipsoid);
+
+    if (!rectangle) {
+        return [[[-90, -180], [90, 180]]];
+    }
+
+    let west = Cesium.Math.toDegrees(rectangle.west) - AIS_VIEW_PADDING_DEGREES;
+    let east = Cesium.Math.toDegrees(rectangle.east) + AIS_VIEW_PADDING_DEGREES;
+    let south = clamp(Cesium.Math.toDegrees(rectangle.south) - AIS_VIEW_PADDING_DEGREES, -90, 90);
+    let north = clamp(Cesium.Math.toDegrees(rectangle.north) + AIS_VIEW_PADDING_DEGREES, -90, 90);
+
+    let width = east - west;
+    if (width < 0) width += 360;
+    if (width >= 359) {
+        const center = viewer.camera.positionCartographic;
+        const centerLat = Cesium.Math.toDegrees(center.latitude);
+        const centerLon = Cesium.Math.toDegrees(center.longitude);
+        const limited = limitAisSpan(
+            centerLat - AIS_MAX_LAT_SPAN_DEGREES / 2,
+            centerLon - AIS_MAX_LON_SPAN_DEGREES / 2,
+            centerLat + AIS_MAX_LAT_SPAN_DEGREES / 2,
+            centerLon + AIS_MAX_LON_SPAN_DEGREES / 2
+        );
+        return [[[limited.south, limited.west], [limited.north, limited.east]]];
+    }
+
+    if (width > AIS_MAX_LON_SPAN_DEGREES || north - south > AIS_MAX_LAT_SPAN_DEGREES) {
+        const midLon = west + width / 2;
+        const limited = limitAisSpan(south, midLon - width / 2, north, midLon + width / 2);
+        west = limited.west;
+        east = limited.east;
+        south = limited.south;
+        north = limited.north;
+    }
+
+    west = Cesium.Math.toDegrees(Cesium.Math.negativePiToPi(Cesium.Math.toRadians(west)));
+    east = Cesium.Math.toDegrees(Cesium.Math.negativePiToPi(Cesium.Math.toRadians(east)));
+
+    if (west <= east) {
+        return [[[south, west], [north, east]]];
+    }
+
+    return [
+        [[south, west], [north, 180]],
+        [[south, -180], [north, east]]
+    ];
+}
+
+function getAisScopeKey() {
+    return JSON.stringify(getAisBoundingBoxes().map(box => box.map(point => point.map(value => Number(value).toFixed(2)))));
 }
 
 async function fetchFlightData() {
@@ -335,6 +483,28 @@ function formatNumber(value, digits) {
     });
 }
 
+function getPlaneAltitudeColor(altitudeMeters) {
+    const altitude = clamp(Number(altitudeMeters), 0, FLIGHT_BLUE_ALTITUDE_M);
+
+    if (altitude <= FLIGHT_GREEN_ALTITUDE_M) {
+        const ratio = altitude / FLIGHT_GREEN_ALTITUDE_M;
+        return new Cesium.Color(1 - ratio, ratio, 0, 1);
+    }
+
+    const ratio = (altitude - FLIGHT_GREEN_ALTITUDE_M) / (FLIGHT_BLUE_ALTITUDE_M - FLIGHT_GREEN_ALTITUDE_M);
+    return new Cesium.Color(0, 1 - ratio, ratio, 1);
+}
+
+function getPlaneBillboardRotation(headingDegrees) {
+    if (!hasFiniteNumbers(headingDegrees)) return 0;
+    return Cesium.Math.toRadians(Number(headingDegrees)) - PLANE_ICON_HEADING_OFFSET_RADIANS;
+}
+
+function getBillboardRotationFromHeading(headingDegrees) {
+    if (!hasFiniteNumbers(headingDegrees)) return 0;
+    return Cesium.Math.toRadians(Number(headingDegrees));
+}
+
 function setText(id, text) {
     const element = document.getElementById(id);
     if (element) {
@@ -373,82 +543,177 @@ function hideSatelliteInfoPanel() {
 }
 
 // 3. FUNKTION: INITIALISÉR SATELLITTER
+function sendAisSubscription(force = false) {
+    if (!aisSocket || aisSocket.readyState !== WebSocket.OPEN || !isLayerChecked('toggle-ship-traffic')) {
+        return;
+    }
+
+    const now = Date.now();
+    const scopeKey = getAisScopeKey();
+    if (!force && scopeKey === aisLastScopeKey) return;
+
+    if (!force && now - aisLastSubscriptionAt < AIS_MIN_SUBSCRIPTION_GAP_MS) {
+        scheduleAisSubscription(AIS_MIN_SUBSCRIPTION_GAP_MS - (now - aisLastSubscriptionAt));
+        return;
+    }
+
+    aisLastScopeKey = scopeKey;
+    aisLastSubscriptionAt = now;
+    aisSocket.send(JSON.stringify({
+        APIKey: AIS_API_KEY,
+        BoundingBoxes: getAisBoundingBoxes(),
+        FilterMessageTypes: [
+            'PositionReport',
+            'StandardClassBPositionReport',
+            'ExtendedClassBPositionReport',
+            'ShipStaticData',
+            'StaticDataReport'
+        ]
+    }));
+}
+
+function scheduleAisSubscription(delayMs = AIS_SUBSCRIPTION_DEBOUNCE_MS) {
+    window.clearTimeout(aisSubscriptionTimer);
+    aisSubscriptionTimer = window.setTimeout(() => sendAisSubscription(), delayMs);
+}
+
+function getAisPositionReport(message) {
+    if (!message) return null;
+    return message.PositionReport ||
+        message.StandardClassBPositionReport ||
+        message.ExtendedClassBPositionReport;
+}
+
+function updateAisStaticData(mmsi, aisData) {
+    if (!mmsi || !aisData.MetaData) return;
+
+    const staticData = aisData.Message && (aisData.Message.ShipStaticData || aisData.Message.StaticDataReport || {});
+    const existing = shipStaticByMmsi.get(mmsi) || {};
+    const name = (aisData.MetaData.ShipName || staticData.Name || staticData.ShipName || existing.name || `Vessel ${mmsi}`).trim();
+    const destination = (staticData.Destination || existing.destination || '').trim();
+    const shipType = staticData.Type || staticData.ShipType || existing.shipType;
+
+    shipStaticByMmsi.set(mmsi, {
+        name,
+        destination,
+        shipType
+    });
+}
+
+function upsertAisShip(aisData) {
+    const report = getAisPositionReport(aisData.Message);
+    if (!aisData.MetaData || !report) return;
+
+    const mmsi = aisData.MetaData.MMSI;
+    updateAisStaticData(mmsi, aisData);
+
+    const staticData = shipStaticByMmsi.get(mmsi) || {};
+    const name = staticData.name || (aisData.MetaData.ShipName || `Vessel ${mmsi}`).trim();
+    const lat = Number(report.Latitude);
+    const lon = Number(report.Longitude);
+    const speed = Number(report.Sog);
+    const course = Number(report.Cog);
+
+    if (!mmsi || !hasFiniteNumbers(lat, lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+        return;
+    }
+
+    const position = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
+    if (!hasValidCartesian(position)) return;
+
+    const description = [
+        'Live AIS',
+        `MMSI: ${mmsi}`,
+        `Fart: ${hasFiniteNumbers(speed) ? speed.toFixed(1) : '-'} kn`,
+        `Kurs: ${hasFiniteNumbers(course) ? course.toFixed(0) : '-'} deg`,
+        `Destination: ${staticData.destination || '-'}`,
+        `Skibstype: ${staticData.shipType || '-'}`
+    ].join('<br>');
+
+    if (liveShipEntities.has(mmsi)) {
+        const ship = liveShipEntities.get(mmsi);
+        ship.entity.position = position;
+        ship.entity.show = isLayerChecked('toggle-ship-traffic');
+        ship.entity.name = name;
+        ship.entity.description = description;
+        ship.entity.label.text = name;
+        ship.entity.billboard.rotation = getBillboardRotationFromHeading(course);
+        ship.lastSeen = Date.now();
+        return;
+    }
+
+    const entity = viewer.entities.add({
+        name,
+        position,
+        billboard: {
+            image: SHIP_ICON,
+            scale: 0.55,
+            rotation: getBillboardRotationFromHeading(course),
+            alignedAxis: Cesium.Cartesian3.ZERO
+        },
+        label: {
+            text: name,
+            font: '9pt sans-serif',
+            pixelOffset: new Cesium.Cartesian2(0, -14),
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 800000)
+        },
+        description
+    });
+    liveShipEntities.set(mmsi, { entity, lastSeen: Date.now() });
+}
+
+function cleanupStaleAisShips() {
+    const now = Date.now();
+    liveShipEntities.forEach((ship, mmsi) => {
+        if (now - ship.lastSeen <= AIS_STALE_MS) return;
+        viewer.entities.remove(ship.entity);
+        liveShipEntities.delete(mmsi);
+        shipStaticByMmsi.delete(mmsi);
+    });
+}
+
+async function parseWebSocketJsonMessage(data) {
+    const text = data instanceof Blob ? await data.text() : data;
+    return JSON.parse(text);
+}
+
 function connectAIS() {
     if (!AIS_API_KEY) {
         console.warn('AIS API key mangler.');
         return;
     }
 
-    const socket = new WebSocket(AIS_STREAM_URL);
+    window.clearTimeout(aisReconnectTimer);
+    aisSocket = new WebSocket(AIS_STREAM_URL);
 
-    socket.addEventListener('open', () => {
-        socket.send(JSON.stringify({
-            APIKey: AIS_API_KEY,
-            BoundingBoxes: [[[-15.0, 45.0], [25.0, 65.0]]],
-            FilterMessageTypes: ['PositionReport'],
-            FiltersShipTypes: [1, 36, 37, 70, 71, 72, 73, 74, 80]
-        }));
+    aisSocket.addEventListener('open', () => {
+        aisLastScopeKey = '';
+        sendAisSubscription(true);
     });
 
-    socket.addEventListener('message', event => {
-        if (!isLayerChecked('toggle-ships')) return;
+    aisSocket.addEventListener('message', async event => {
+        if (!isLayerChecked('toggle-ship-traffic')) return;
 
         try {
-            const aisData = JSON.parse(event.data);
-            const report = aisData.Message && aisData.Message.PositionReport;
-            if (!aisData.MetaData || !report) return;
-
-            const mmsi = aisData.MetaData.MMSI;
-            const name = (aisData.MetaData.ShipName || `Vessel ${mmsi}`).trim();
-            const lat = Number(report.Latitude);
-            const lon = Number(report.Longitude);
-            const speed = Number(report.Sog);
-
-            if (!mmsi || !hasFiniteNumbers(lat, lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+            const aisData = await parseWebSocketJsonMessage(event.data);
+            if (aisData.error) {
+                console.warn('AISStream svar:', aisData.error);
                 return;
             }
-
-            const position = Cesium.Cartesian3.fromDegrees(lon, lat, 0);
-            if (!hasValidCartesian(position)) return;
-
-            const description = `Live AIS<br>MMSI: ${mmsi}<br>Fart: ${hasFiniteNumbers(speed) ? speed.toFixed(1) : '-'} kn`;
-
-            if (liveShipEntities.has(mmsi)) {
-                const entity = liveShipEntities.get(mmsi);
-                entity.position = position;
-                entity.show = true;
-                entity.description = description;
-                return;
-            }
-
-            const entity = viewer.entities.add({
-                name,
-                position,
-                point: {
-                    pixelSize: 8,
-                    color: Cesium.Color.DODGERBLUE,
-                    outlineColor: Cesium.Color.WHITE,
-                    outlineWidth: 1
-                },
-                label: {
-                    text: name,
-                    font: '9pt sans-serif',
-                    pixelOffset: new Cesium.Cartesian2(0, -14),
-                    distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 800000)
-                },
-                description
-            });
-            liveShipEntities.set(mmsi, entity);
+            const mmsi = aisData.MetaData && aisData.MetaData.MMSI;
+            updateAisStaticData(mmsi, aisData);
+            upsertAisShip(aisData);
+            cleanupStaleAisShips();
         } catch (e) {
             console.warn('AIS besked kunne ikke laeses:', e);
         }
     });
 
-    socket.addEventListener('close', () => {
-        setTimeout(connectAIS, 10000);
+    aisSocket.addEventListener('close', () => {
+        aisReconnectTimer = window.setTimeout(connectAIS, AIS_RECONNECT_MS);
     });
 
-    socket.addEventListener('error', error => {
+    aisSocket.addEventListener('error', error => {
         console.warn('AISStream fejl:', error);
     });
 }
@@ -495,11 +760,14 @@ async function updateFlights() {
             if (!hasValidCartesian(position)) return;
 
             seenFlights.add(icao);
+            const originCountry = (flight[2] || 'Ukendt').trim();
+            const altitudeColor = getPlaneAltitudeColor(altitude);
 
             const description = [
                 'Live flytrafik',
                 `Callsign: ${callsign}`,
                 `ICAO: ${icao}`,
+                `Registreret land: ${originCountry}`,
                 `Hoejde: ${formatNumber(altitude, 0)} m`,
                 `Hastighed: ${hasFiniteNumbers(velocityMs) ? formatNumber(velocityMs * 3.6, 0) : '-'} km/t`,
                 `Kurs: ${hasFiniteNumbers(heading) ? formatNumber(heading, 0) : '-'} deg`
@@ -514,7 +782,8 @@ async function updateFlights() {
                 entity.show = true;
                 entity.description = description;
                 entity.label.text = callsign;
-                entity.billboard.rotation = hasFiniteNumbers(heading) ? Cesium.Math.toRadians(heading) : 0;
+                entity.billboard.rotation = getPlaneBillboardRotation(heading);
+                entity.billboard.color = altitudeColor;
                 entity.path.show = plane.sampleCount >= 2;
                 return;
             }
@@ -534,8 +803,9 @@ async function updateFlights() {
                 billboard: {
                     image: PLANE_ICON,
                     scale: 0.45,
-                    rotation: hasFiniteNumbers(heading) ? Cesium.Math.toRadians(heading) : 0,
-                    alignedAxis: Cesium.Cartesian3.ZERO
+                    rotation: getPlaneBillboardRotation(heading),
+                    alignedAxis: Cesium.Cartesian3.ZERO,
+                    color: altitudeColor
                 },
                 label: {
                     text: callsign,
@@ -602,8 +872,7 @@ function initSatellites() {
             point: { pixelSize: 10, color: sat.color, outlineColor: Cesium.Color.WHITE, outlineWidth: 2 },
             label: { 
                 text: sat.name, font: '12pt sans-serif', 
-                pixelOffset: new Cesium.Cartesian2(0, -15),
-                disableDepthTestDistance: Number.POSITIVE_INFINITY 
+                pixelOffset: new Cesium.Cartesian2(0, -15)
             },
             path: {
                 show: false,
@@ -738,16 +1007,209 @@ async function initEarthquakes() {
 // 7. FUNKTION: MARITIME LAG (SKIBE & MILITÆR)
 function initMaritimeLayers() {
     const civilSpots = [
-        { name: "Port of Shanghai", pos: [121.7, 31.2] },
-        { name: "Port of Rotterdam", pos: [4.4, 51.9] },
-        { name: "Singapore Strait", pos: [103.8, 1.2] }
+        { name: "Port of Shanghai", pos: [121.49, 31.23] },
+        { name: "Port of Singapore", pos: [103.75, 1.26] },
+        { name: "Port of Ningbo-Zhoushan", pos: [122.10, 29.87] },
+        { name: "Port of Shenzhen", pos: [114.27, 22.56] },
+        { name: "Port of Guangzhou", pos: [113.45, 22.93] },
+        { name: "Port of Qingdao", pos: [120.32, 36.06] },
+        { name: "Port of Busan", pos: [129.08, 35.10] },
+        { name: "Port of Tianjin", pos: [117.75, 39.00] },
+        { name: "Port of Hong Kong", pos: [114.16, 22.29] },
+        { name: "Port of Rotterdam", pos: [4.40, 51.90] },
+        { name: "Port Klang", pos: [101.39, 3.00] },
+        { name: "Port of Antwerp-Bruges", pos: [4.31, 51.26] },
+        { name: "Port of Kaohsiung", pos: [120.29, 22.61] },
+        { name: "Port of Xiamen", pos: [118.07, 24.45] },
+        { name: "Port of Tanjung Pelepas", pos: [103.55, 1.36] },
+        { name: "Port of Laem Chabang", pos: [100.88, 13.08] },
+        { name: "Port of Los Angeles", pos: [-118.26, 33.74] },
+        { name: "Port of Long Beach", pos: [-118.21, 33.76] },
+        { name: "Port of Hamburg", pos: [9.99, 53.54] },
+        { name: "Port of New York and New Jersey", pos: [-74.04, 40.67] },
+        { name: "Port of Tanjung Priok", pos: [106.89, -6.10] },
+        { name: "Port of Ho Chi Minh City", pos: [106.75, 10.75] },
+        { name: "Port of Colombo", pos: [79.84, 6.95] },
+        { name: "Port of Jebel Ali", pos: [55.03, 25.01] },
+        { name: "Port of Jawaharlal Nehru", pos: [72.95, 18.95] },
+        { name: "Port of Mundra", pos: [69.70, 22.74] },
+        { name: "Port of Felixstowe", pos: [1.31, 51.95] },
+        { name: "Port of Piraeus", pos: [23.63, 37.94] },
+        { name: "Port of Valencia", pos: [-0.32, 39.45] },
+        { name: "Port of Algeciras", pos: [-5.44, 36.13] },
+        { name: "Port of Bremerhaven", pos: [8.58, 53.55] },
+        { name: "Port of Le Havre", pos: [0.12, 49.49] },
+        { name: "Port of Barcelona", pos: [2.16, 41.34] },
+        { name: "Port of Genoa", pos: [8.92, 44.41] },
+        { name: "Port of Gioia Tauro", pos: [15.90, 38.44] },
+        { name: "Port of Marsaxlokk", pos: [14.54, 35.84] },
+        { name: "Port Said", pos: [32.31, 31.27] },
+        { name: "Suez Canal Container Terminal", pos: [32.34, 31.23] },
+        { name: "Port of Tanger Med", pos: [-5.81, 35.89] },
+        { name: "Port of Durban", pos: [31.02, -29.88] },
+        { name: "Port of Mombasa", pos: [39.65, -4.04] },
+        { name: "Port of Lagos", pos: [3.36, 6.44] },
+        { name: "Port of Tema", pos: [0.01, 5.64] },
+        { name: "Port of Abidjan", pos: [-4.02, 5.29] },
+        { name: "Port of Dakar", pos: [-17.43, 14.68] },
+        { name: "Port of Casablanca", pos: [-7.62, 33.61] },
+        { name: "Port of Alexandria", pos: [29.88, 31.20] },
+        { name: "Port of Damietta", pos: [31.77, 31.47] },
+        { name: "Port of King Abdullah", pos: [39.10, 22.38] },
+        { name: "Jeddah Islamic Port", pos: [39.15, 21.45] },
+        { name: "Port of Salalah", pos: [54.01, 16.94] },
+        { name: "Port Sultan Qaboos", pos: [58.57, 23.63] },
+        { name: "Hamad Port", pos: [51.62, 24.80] },
+        { name: "Port of Dammam", pos: [50.21, 26.50] },
+        { name: "Port of Kuwait Shuwaikh", pos: [47.93, 29.36] },
+        { name: "Port of Manama", pos: [50.61, 26.24] },
+        { name: "Port of Umm Qasr", pos: [47.94, 30.04] },
+        { name: "Port of Bandar Abbas", pos: [56.28, 27.14] },
+        { name: "Port of Chabahar", pos: [60.61, 25.30] },
+        { name: "Port of Karachi", pos: [66.98, 24.84] },
+        { name: "Port Qasim", pos: [67.33, 24.78] },
+        { name: "Port of Chittagong", pos: [91.81, 22.31] },
+        { name: "Port of Yangon", pos: [96.16, 16.77] },
+        { name: "Port of Manila", pos: [120.96, 14.59] },
+        { name: "Port of Subic Bay", pos: [120.23, 14.82] },
+        { name: "Port of Batangas", pos: [121.05, 13.75] },
+        { name: "Port of Cebu", pos: [123.90, 10.30] },
+        { name: "Port of Davao", pos: [125.61, 7.09] },
+        { name: "Port of Tokyo", pos: [139.78, 35.61] },
+        { name: "Port of Yokohama", pos: [139.65, 35.45] },
+        { name: "Port of Nagoya", pos: [136.86, 35.08] },
+        { name: "Port of Kobe", pos: [135.20, 34.68] },
+        { name: "Port of Osaka", pos: [135.43, 34.65] },
+        { name: "Port of Kitakyushu", pos: [130.88, 33.93] },
+        { name: "Port of Incheon", pos: [126.59, 37.45] },
+        { name: "Port of Gwangyang", pos: [127.73, 34.90] },
+        { name: "Port of Ulsan", pos: [129.38, 35.50] },
+        { name: "Port of Dalian", pos: [121.66, 38.92] },
+        { name: "Port of Yingkou", pos: [122.23, 40.67] },
+        { name: "Port of Lianyungang", pos: [119.45, 34.75] },
+        { name: "Port of Suzhou", pos: [120.62, 31.34] },
+        { name: "Port of Fuzhou", pos: [119.46, 26.02] },
+        { name: "Port of Haiphong", pos: [106.68, 20.86] },
+        { name: "Port of Cai Mep", pos: [107.03, 10.55] },
+        { name: "Port of Bangkok", pos: [100.56, 13.70] },
+        { name: "Port of Sihanoukville", pos: [103.51, 10.63] },
+        { name: "Port of Sydney", pos: [151.21, -33.86] },
+        { name: "Port Botany", pos: [151.22, -33.97] },
+        { name: "Port of Melbourne", pos: [144.91, -37.84] },
+        { name: "Port of Brisbane", pos: [153.17, -27.38] },
+        { name: "Port of Fremantle", pos: [115.74, -32.05] },
+        { name: "Port of Auckland", pos: [174.78, -36.84] },
+        { name: "Port of Tauranga", pos: [176.18, -37.66] },
+        { name: "Port of Vancouver", pos: [-123.11, 49.29] },
+        { name: "Port of Prince Rupert", pos: [-130.32, 54.31] },
+        { name: "Port of Seattle", pos: [-122.34, 47.60] },
+        { name: "Port of Tacoma", pos: [-122.41, 47.27] },
+        { name: "Port of Oakland", pos: [-122.32, 37.80] },
+        { name: "Port of Savannah", pos: [-81.14, 32.08] },
+        { name: "Port of Houston", pos: [-95.27, 29.73] }
     ];
 
     const militarySpots = [
-        { name: "Pearl Harbor (USA)", pos: [-157.9, 21.3] },
-        { name: "Naval Base Norfolk (USA)", pos: [-76.3, 36.9] },
-        { name: "Sevastopol Naval Base (RU)", pos: [33.5, 44.6] },
-        { name: "Portsmouth Naval Base (UK)", pos: [-1.1, 50.8] }
+        { name: "Naval Station Norfolk (USA)", pos: [-76.32, 36.95] },
+        { name: "Naval Base San Diego (USA)", pos: [-117.13, 32.68] },
+        { name: "Joint Base Pearl Harbor-Hickam (USA)", pos: [-157.94, 21.35] },
+        { name: "Naval Base Kitsap (USA)", pos: [-122.71, 47.56] },
+        { name: "Naval Station Mayport (USA)", pos: [-81.39, 30.39] },
+        { name: "Naval Submarine Base Kings Bay (USA)", pos: [-81.56, 30.80] },
+        { name: "Naval Submarine Base New London (USA)", pos: [-72.08, 41.39] },
+        { name: "Naval Station Everett (USA)", pos: [-122.22, 47.99] },
+        { name: "Naval Base Ventura County (USA)", pos: [-119.20, 34.17] },
+        { name: "Naval Station Rota (Spain/USA)", pos: [-6.35, 36.62] },
+        { name: "NSA Souda Bay (Greece/USA)", pos: [24.14, 35.49] },
+        { name: "Naval Support Activity Bahrain", pos: [50.58, 26.20] },
+        { name: "Camp Lemonnier Djibouti", pos: [43.15, 11.55] },
+        { name: "Guantanamo Bay Naval Base", pos: [-75.14, 19.91] },
+        { name: "Portsmouth Naval Base (UK)", pos: [-1.11, 50.81] },
+        { name: "Devonport Naval Base (UK)", pos: [-4.18, 50.39] },
+        { name: "HMNB Clyde Faslane (UK)", pos: [-4.82, 56.07] },
+        { name: "Rosyth Dockyard (UK)", pos: [-3.45, 56.02] },
+        { name: "Gibraltar Naval Base (UK)", pos: [-5.36, 36.14] },
+        { name: "Brest Naval Base (France)", pos: [-4.49, 48.38] },
+        { name: "Toulon Naval Base (France)", pos: [5.92, 43.12] },
+        { name: "Cherbourg Naval Base (France)", pos: [-1.62, 49.64] },
+        { name: "Lorient Naval Base (France)", pos: [-3.36, 47.74] },
+        { name: "Kiel Naval Base (Germany)", pos: [10.15, 54.33] },
+        { name: "Wilhelmshaven Naval Base (Germany)", pos: [8.15, 53.53] },
+        { name: "Eckernforde Naval Base (Germany)", pos: [9.84, 54.48] },
+        { name: "Den Helder Naval Base (Netherlands)", pos: [4.76, 52.96] },
+        { name: "Zeebrugge Naval Base (Belgium)", pos: [3.19, 51.34] },
+        { name: "Karlskrona Naval Base (Sweden)", pos: [15.59, 56.16] },
+        { name: "Muskö Naval Base (Sweden)", pos: [18.12, 59.00] },
+        { name: "Haakonsvern Naval Base (Norway)", pos: [5.22, 60.33] },
+        { name: "Frederikshavn Naval Base (Denmark)", pos: [10.54, 57.44] },
+        { name: "Korsoer Naval Station (Denmark)", pos: [11.14, 55.33] },
+        { name: "Turku/Pansio Naval Base (Finland)", pos: [22.12, 60.44] },
+        { name: "Upinniemi Naval Base (Finland)", pos: [24.34, 60.04] },
+        { name: "Gdynia Naval Base (Poland)", pos: [18.55, 54.53] },
+        { name: "Swietoujscie Naval Base (Poland)", pos: [14.25, 53.91] },
+        { name: "La Spezia Naval Base (Italy)", pos: [9.83, 44.10] },
+        { name: "Taranto Naval Base (Italy)", pos: [17.23, 40.47] },
+        { name: "Augusta Naval Base (Italy)", pos: [15.22, 37.23] },
+        { name: "Cartagena Naval Base (Spain)", pos: [-0.98, 37.60] },
+        { name: "Ferrol Naval Base (Spain)", pos: [-8.24, 43.48] },
+        { name: "Lisbon Naval Base (Portugal)", pos: [-9.12, 38.70] },
+        { name: "Athens Salamis Naval Base (Greece)", pos: [23.49, 37.96] },
+        { name: "Aksaz Naval Base (Turkey)", pos: [28.39, 36.84] },
+        { name: "Golcuk Naval Base (Turkey)", pos: [29.82, 40.72] },
+        { name: "Constanta Naval Base (Romania)", pos: [28.65, 44.17] },
+        { name: "Varna Naval Base (Bulgaria)", pos: [27.91, 43.20] },
+        { name: "Sevastopol Naval Base (Russia)", pos: [33.53, 44.62] },
+        { name: "Novorossiysk Naval Base (Russia)", pos: [37.80, 44.72] },
+        { name: "Baltiysk Naval Base (Russia)", pos: [19.91, 54.64] },
+        { name: "Kronstadt Naval Base (Russia)", pos: [29.77, 59.99] },
+        { name: "Severomorsk Naval Base (Russia)", pos: [33.42, 69.07] },
+        { name: "Polyarny Naval Base (Russia)", pos: [33.45, 69.20] },
+        { name: "Vladivostok Naval Base (Russia)", pos: [131.89, 43.10] },
+        { name: "Vilyuchinsk Naval Base (Russia)", pos: [158.41, 52.91] },
+        { name: "Tartus Naval Facility (Syria/Russia)", pos: [35.87, 34.89] },
+        { name: "Alexandria Naval Base (Egypt)", pos: [29.88, 31.20] },
+        { name: "Mers El Kebir Naval Base (Algeria)", pos: [-0.70, 35.73] },
+        { name: "Casablanca Naval Base (Morocco)", pos: [-7.62, 33.61] },
+        { name: "Simonstown Naval Base (South Africa)", pos: [18.43, -34.19] },
+        { name: "Durban Naval Base (South Africa)", pos: [31.02, -29.88] },
+        { name: "Lagos Naval Base (Nigeria)", pos: [3.36, 6.44] },
+        { name: "Mombasa Naval Base (Kenya)", pos: [39.65, -4.04] },
+        { name: "Jeddah Naval Base (Saudi Arabia)", pos: [39.15, 21.45] },
+        { name: "Jubail Naval Base (Saudi Arabia)", pos: [49.66, 27.00] },
+        { name: "Abu Dhabi Naval Base (UAE)", pos: [54.37, 24.48] },
+        { name: "Jebel Ali Naval Facility (UAE)", pos: [55.03, 25.01] },
+        { name: "Karachi Naval Dockyard (Pakistan)", pos: [66.98, 24.84] },
+        { name: "Mumbai Naval Dockyard (India)", pos: [72.84, 18.93] },
+        { name: "Visakhapatnam Naval Base (India)", pos: [83.29, 17.69] },
+        { name: "Kochi Naval Base (India)", pos: [76.27, 9.97] },
+        { name: "Karwar INS Kadamba (India)", pos: [74.09, 14.82] },
+        { name: "Port Blair Naval Base (India)", pos: [92.75, 11.67] },
+        { name: "Trincomalee Naval Base (Sri Lanka)", pos: [81.23, 8.56] },
+        { name: "Chittagong Naval Base (Bangladesh)", pos: [91.81, 22.31] },
+        { name: "Sattahip Naval Base (Thailand)", pos: [100.91, 12.66] },
+        { name: "Ream Naval Base (Cambodia)", pos: [103.69, 10.51] },
+        { name: "Cam Ranh Bay Naval Base (Vietnam)", pos: [109.20, 11.91] },
+        { name: "Changi Naval Base (Singapore)", pos: [104.03, 1.32] },
+        { name: "Lumut Naval Base (Malaysia)", pos: [100.61, 4.23] },
+        { name: "Tanjung Priok Naval Base (Indonesia)", pos: [106.89, -6.10] },
+        { name: "Surabaya Naval Base (Indonesia)", pos: [112.73, -7.21] },
+        { name: "Subic Bay Naval Base (Philippines)", pos: [120.23, 14.82] },
+        { name: "Sasebo Naval Base (Japan)", pos: [129.72, 33.16] },
+        { name: "Yokosuka Naval Base (Japan)", pos: [139.67, 35.28] },
+        { name: "Kure Naval Base (Japan)", pos: [132.55, 34.24] },
+        { name: "Maizuru Naval Base (Japan)", pos: [135.39, 35.47] },
+        { name: "Jinhae Naval Base (South Korea)", pos: [128.66, 35.14] },
+        { name: "Busan Naval Base (South Korea)", pos: [129.08, 35.10] },
+        { name: "Jeju Naval Base (South Korea)", pos: [126.49, 33.23] },
+        { name: "Qingdao Naval Base (China)", pos: [120.32, 36.06] },
+        { name: "Ningbo-Zhoushan Naval Base (China)", pos: [122.10, 29.87] },
+        { name: "Sanya Yulin Naval Base (China)", pos: [109.50, 18.21] },
+        { name: "Zhanjiang Naval Base (China)", pos: [110.40, 21.20] },
+        { name: "Keelung Naval Base (Taiwan)", pos: [121.75, 25.13] },
+        { name: "Kaohsiung Naval Base (Taiwan)", pos: [120.29, 22.61] },
+        { name: "Fleet Base East Sydney (Australia)", pos: [151.23, -33.85] },
+        { name: "Fleet Base West HMAS Stirling (Australia)", pos: [115.69, -32.24] },
+        { name: "Devonport Naval Base (New Zealand)", pos: [174.81, -36.83] }
     ];
 
     civilSpots.forEach(s => {
@@ -776,7 +1238,12 @@ document.getElementById('toggle-quakes').addEventListener('change', e => {
 });
 document.getElementById('toggle-ships').addEventListener('change', e => {
     shipEntities.forEach(ent => ent.show = e.target.checked);
+});
+document.getElementById('toggle-ship-traffic').addEventListener('change', e => {
     setMapEntitiesVisible(liveShipEntities, e.target.checked);
+    if (e.target.checked) {
+        sendAisSubscription(true);
+    }
 });
 document.getElementById('toggle-planes').addEventListener('change', e => {
     setMapEntitiesVisible(planeEntities, e.target.checked);
@@ -790,10 +1257,12 @@ document.getElementById('toggle-military').addEventListener('change', e => {
 
 viewer.camera.moveEnd.addEventListener(() => {
     scheduleFlightUpdate();
+    scheduleAisSubscription();
 });
 
 // 9. HØJDEMÅLER LOGIK
 viewer.scene.postRender.addEventListener(() => {
+    applyVisibleSideScope();
     const cameraHeight = viewer.camera.positionCartographic.height;
     const heightInKm = (cameraHeight / 1000).toFixed(1);
     document.getElementById('altitude-display').innerText = `Højde: ${heightInKm} km`;
