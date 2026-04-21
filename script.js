@@ -2,7 +2,12 @@
 Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI4YWE4MjRkYy0wYTRjLTQ0N2MtYTUyNC1kNGNlY2RkNTFjMjgiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzYzMzI0Njh9.8ZT0_Y4I8w8TVhMqanhTsZXWoL-iZBx0hiS8Q0nhFFc';
 const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
 const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
-const FLIGHT_DATA_URL = 'https://opensky-network.org/api/states/all?lamin=45.0&lomin=-10.0&lamax=60.0&lomax=20.0';
+const FLIGHT_BOUNDS_QUERY = 'lamin=45.0&lomin=-10.0&lamax=60.0&lomax=20.0';
+const FLIGHT_DATA_PATH = `/api/flights?${FLIGHT_BOUNDS_QUERY}`;
+const FLIGHT_DATA_URLS = [
+    FLIGHT_DATA_PATH,
+    `http://127.0.0.1:5600${FLIGHT_DATA_PATH}`
+];
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
 const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -86,7 +91,60 @@ function setMapEntitiesVisible(entities, visible) {
     });
 }
 
+function createPlaneIcon() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 48;
+    canvas.height = 48;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(24, 24);
+    ctx.fillStyle = '#f6c400';
+    ctx.strokeStyle = '#6d5700';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -21);
+    ctx.lineTo(5, -4);
+    ctx.lineTo(20, 3);
+    ctx.lineTo(20, 8);
+    ctx.lineTo(4, 5);
+    ctx.lineTo(4, 16);
+    ctx.lineTo(10, 20);
+    ctx.lineTo(10, 23);
+    ctx.lineTo(0, 18);
+    ctx.lineTo(-10, 23);
+    ctx.lineTo(-10, 20);
+    ctx.lineTo(-4, 16);
+    ctx.lineTo(-4, 5);
+    ctx.lineTo(-20, 8);
+    ctx.lineTo(-20, 3);
+    ctx.lineTo(-5, -4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    return canvas.toDataURL();
+}
+
+const PLANE_ICON = createPlaneIcon();
+
 let selectedSatelliteKey = null;
+
+async function fetchFlightData() {
+    const urls = [...new Set(FLIGHT_DATA_URLS)];
+
+    for (const url of urls) {
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                console.warn('Kunne ikke hente flydata:', response.status, response.statusText, url);
+                continue;
+            }
+            return await response.json();
+        } catch (e) {
+            console.warn('Flydata-kilde fejlede:', url, e);
+        }
+    }
+
+    throw new Error('Ingen flydata-kilder svarede. Start proxyen med: node server.js');
+}
 
 function addSatelliteSample(sat, time, position, telemetry) {
     if (!hasValidCartesian(position)) {
@@ -284,13 +342,7 @@ async function updateFlights() {
     if (!isLayerChecked('toggle-planes')) return;
 
     try {
-        const response = await fetch(FLIGHT_DATA_URL);
-        if (!response.ok) {
-            console.warn('Kunne ikke hente flydata:', response.status, response.statusText);
-            return;
-        }
-
-        const data = await response.json();
+        const data = await fetchFlightData();
         if (!Array.isArray(data.states)) return;
 
         data.states.slice(0, 80).forEach(flight => {
@@ -324,17 +376,19 @@ async function updateFlights() {
                 entity.show = true;
                 entity.description = description;
                 entity.label.text = callsign;
+                entity.billboard.rotation = hasFiniteNumbers(heading) ? Cesium.Math.toRadians(heading) : 0;
                 return;
             }
 
             const entity = viewer.entities.add({
                 name: `Fly: ${callsign}`,
                 position,
-                point: {
-                    pixelSize: 7,
-                    color: Cesium.Color.LIME,
-                    outlineColor: Cesium.Color.BLACK,
-                    outlineWidth: 1
+                billboard: {
+                    image: PLANE_ICON,
+                    scale: 0.45,
+                    rotation: hasFiniteNumbers(heading) ? Cesium.Math.toRadians(heading) : 0,
+                    alignedAxis: Cesium.Cartesian3.ZERO,
+                    disableDepthTestDistance: Number.POSITIVE_INFINITY
                 },
                 label: {
                     text: callsign,
