@@ -8,17 +8,55 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.0.0/satellite.min.js"></script>
     <link href="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
     <style>
-        #cesiumContainer { position: absolute; top: 0; left: 0; height: 100vh; width: 100%; margin: 0; overflow: hidden; }
+        html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #061014; }
+        #cesiumContainer { position: absolute; inset: 0; height: 100vh; width: 100%; margin: 0; overflow: hidden; z-index: 0; }
         
         /* Kontrolpanel stil */
         #ui-panel {
-            position: absolute; top: 10px; left: 10px;
-            background: rgba(30, 30, 30, 0.8);
-            color: white; padding: 15px; border-radius: 8px;
-            font-family: sans-serif; z-index: 100; border: 1px solid #444;
+            position: absolute; top: 12px; left: 12px;
+            width: min(300px, calc(100vw - 24px));
+            background: rgba(10, 17, 22, 0.88);
+            color: white; padding: 16px; border-radius: 8px;
+            font-family: Arial, sans-serif; z-index: 100;
+            border: 1px solid rgba(0, 255, 204, 0.28);
+            box-shadow: 0 12px 34px rgba(0, 0, 0, 0.42);
+            backdrop-filter: blur(8px);
         }
-        #ui-panel h3 { margin: 0 0 10px 0; font-size: 16px; color: #00ffcc; }
-        .layer-item { margin-bottom: 8px; cursor: pointer; display: block; }
+        #ui-panel h3 { margin: 0; font-size: 20px; color: #00ffcc; letter-spacing: 0; }
+        #ui-panel .panel-subtitle { margin: 3px 0 14px; color: #b8c8cd; font-size: 12px; }
+        #ui-panel .control-section { border-top: 1px solid rgba(255, 255, 255, 0.16); padding-top: 12px; margin-top: 12px; }
+        #ui-panel .section-title { margin: 0 0 8px; color: #00ffcc; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+        #ui-panel .layer-group + .layer-group { margin-top: 12px; }
+        #ui-panel .group-title {
+            margin: 0 0 6px; color: #9fb5bb; font-size: 11px; font-weight: 700;
+            text-transform: uppercase;
+        }
+        #ui-panel .action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        #ui-panel button {
+            width: 100%; min-height: 34px; border: 1px solid rgba(0, 255, 204, 0.48);
+            border-radius: 6px; background: rgba(255, 255, 255, 0.08);
+            color: white; font-size: 13px; cursor: pointer;
+        }
+        #ui-panel button:hover { background: #00ffcc; color: #061014; }
+        #ui-panel .layer-list { display: grid; gap: 6px; }
+        .layer-item {
+            min-height: 34px; padding: 6px 8px; cursor: pointer; display: flex;
+            align-items: center; justify-content: space-between; gap: 12px;
+            border-radius: 6px; color: #f2f6f7; font-size: 14px;
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .layer-item:hover { background: rgba(255, 255, 255, 0.1); }
+        .layer-item input {
+            appearance: none; width: 36px; height: 20px; margin: 0; flex: 0 0 auto;
+            border-radius: 999px; background: rgba(255, 255, 255, 0.28);
+            border: 1px solid rgba(255, 255, 255, 0.38); position: relative;
+        }
+        .layer-item input::after {
+            content: ""; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px;
+            border-radius: 50%; background: white; transition: transform 0.16s ease;
+        }
+        .layer-item input:checked { background: #2aa8b5; border-color: #5eeaf2; }
+        .layer-item input:checked::after { transform: translateX(16px); }
 
         #satellite-info {
             position: absolute; top: 10px; right: 90px;
@@ -45,26 +83,68 @@
             border-radius: 20px; font-family: monospace;
             font-size: 18px; pointer-events: none; z-index: 100;
         }
+        #app-error {
+            position: absolute; left: 50%; top: 20px; transform: translateX(-50%);
+            max-width: min(720px, calc(100vw - 32px)); padding: 12px 14px;
+            background: rgba(120, 18, 18, 0.94); color: white; border-radius: 8px;
+            font-family: monospace; font-size: 13px; z-index: 200; display: none;
+            white-space: pre-wrap;
+        }
     </style>
+    <script>
+        window.addEventListener('error', event => {
+            const box = document.getElementById('app-error');
+            if (!box) return;
+            box.style.display = 'block';
+            box.textContent = `JavaScript fejl: ${event.message}\n${event.filename || ''}:${event.lineno || ''}`;
+        });
+        window.addEventListener('unhandledrejection', event => {
+            const box = document.getElementById('app-error');
+            if (!box) return;
+            box.style.display = 'block';
+            box.textContent = `Promise fejl: ${event.reason && event.reason.message || event.reason}`;
+        });
+    </script>
 </head>
 <body>
 
     
 <div id="ui-panel">
     <h3>Space Control</h3>
-    <button onclick="flyToSat('iss')">Find ISS</button>
-    <button onclick="flyToSat('tiangong')">Find Tiangong</button>
-    <hr>
-    <h3>Layers</h3>
-    <label class="layer-item"><input type="checkbox" id="toggle-sat" checked> Satellitter</label>
-    <label class="layer-item"><input type="checkbox" id="toggle-quakes" checked> Jordskælv</label>
-    <label class="layer-item"><input type="checkbox" id="toggle-ships" checked> Civile havne</label>
-    <label class="layer-item"><input type="checkbox" id="toggle-ship-traffic" checked> Skibstrafik</label>
-    <label class="layer-item"><input type="checkbox" id="toggle-planes" checked> Flytrafik</label>
-    <label class="layer-item"><input type="checkbox" id="toggle-military" checked> Militær Flåde</label>
+    <p class="panel-subtitle">Live lag og hurtig navigation</p>
+    <div class="action-row">
+        <button onclick="flyToSat('iss')">Find ISS</button>
+        <button onclick="flyToSat('tiangong')">Tiangong</button>
+    </div>
+    <div class="control-section">
+        <p class="section-title">Kortlag</p>
+        <div class="layer-group">
+            <p class="group-title">Rum og luft</p>
+            <div class="layer-list">
+                <label class="layer-item"><span>Satellitter</span><input type="checkbox" id="toggle-sat" checked></label>
+                <label class="layer-item"><span>Lufthavne</span><input type="checkbox" id="toggle-airports" checked></label>
+                <label class="layer-item"><span>Flytrafik</span><input type="checkbox" id="toggle-planes" checked></label>
+            </div>
+        </div>
+        <div class="layer-group">
+            <p class="group-title">Vand</p>
+            <div class="layer-list">
+                <label class="layer-item"><span>Civile havne</span><input type="checkbox" id="toggle-ships" checked></label>
+                <label class="layer-item"><span>Skibstrafik</span><input type="checkbox" id="toggle-ship-traffic" checked></label>
+                <label class="layer-item"><span>Militær Flåde</span><input type="checkbox" id="toggle-military" checked></label>
+            </div>
+        </div>
+        <div class="layer-group">
+            <p class="group-title">Naturfænomener</p>
+            <div class="layer-list">
+                <label class="layer-item"><span>Jordskælv</span><input type="checkbox" id="toggle-quakes" checked></label>
+            </div>
+        </div>
+    </div>
 </div>
 
     <div id="altitude-display">Højde: Henter...</div>
+    <div id="app-error"></div>
 
     <div id="satellite-info">
         <button class="close-button" id="close-satellite-info" aria-label="Luk">x</button>
@@ -80,6 +160,13 @@
     </div>
 
     <div id="cesiumContainer"></div>
+        <script src="js/config.js"></script>
+    <script src="js/icons.js"></script>
+    <script src="js/viewer.js"></script>
+    <script src="js/layers/earthquakes.js"></script>
+    <script src="js/layers/maritime.js"></script>
+    <script src="js/layers/airports.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
+
