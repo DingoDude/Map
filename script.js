@@ -1,4 +1,6 @@
 // 1. DIN CESIUM ION TOKEN
+const CesiumLib = window.Cesium;
+const SatelliteLib = window.satellite;
 Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI5NTBiY2Q0NS02ZDc4LTRkOWEtYmIzYS0yZDdmM2MzMGU3NmIiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzY3NzIzODR9.pGxmdND27nVBk6Wi2I4t_dUYq1ytFnbmYnwLH53Vnro';
 const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
 const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
@@ -70,7 +72,6 @@ const quakeEntities = [];
 const shipEntities = [];
 const airportEntities = [];
 const militaryEntities = [];
-const airportEntities = [];
 const weatherEntities = [];
 const liveShipEntities = new Map();
 const planeEntities = new Map();
