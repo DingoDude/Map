@@ -15,6 +15,7 @@ const AIS_CACHE_KEY = 'space-control-live-ais-ships-v1';
 const AIS_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
 const AIS_CACHE_WRITE_DEBOUNCE_MS = 2500;
 const AIS_CACHE_MAX_SHIPS = 700;
+const AIS_MAX_LIVE_SHIPS = 900;
 const AIS_LABEL_REFRESH_DEBOUNCE_MS = 150;
 const LOCAL_PROXY_ORIGIN = 'http://127.0.0.1:5600';
 const PERSIAN_GULF_VIEW = Cesium.Rectangle.fromDegrees(35.0, 20.0, 60.0, 34.0);
@@ -45,11 +46,38 @@ const SHIP_LABEL_PADDING_PX = 5;
 const SHIP_ICON_COLLISION_PX = 18;
 const SHIP_TRAIL_MAX_POINTS = 24;
 const SHIP_TRAIL_MIN_DISTANCE_M = 60;
+const SHIP_TRAIL_RESET_AFTER_MS = 4 * 60 * 1000;
+const SHIP_TRAIL_MAX_JUMP_M = 25000;
+const SHIP_TRAIL_MAX_REASONABLE_SPEED_KN = 80;
 const SHIP_SEARCH_FOCUS_HEIGHT_M = 35000;
+const UI_INPUT_DEBOUNCE_MS = 180;
+const ALTITUDE_DISPLAY_UPDATE_MS = 250;
 const WATCHLIST_KEY = 'space-control-watchlist-v1';
 const AIRPORT_LABEL_NEAR_DISTANCE_M = 900000;
 const AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M = 3500000;
 const PORT_MAX_CAMERA_HEIGHT_M = 5200000;
+const ALL_SATELLITES_TLE_URL = '/api/tle/active';
+const ALL_SATELLITES_UPDATE_INTERVAL_MS = 30000;
+const ALL_SATELLITES_BATCH_SIZE = 250;
+const ALL_SATELLITES_POINT_SIZE = 5;
+const ALL_SATELLITE_TRACE_PAST_MINUTES = 45;
+const ALL_SATELLITE_TRACE_FUTURE_MINUTES = 90;
+const ALL_SATELLITE_TRACE_STEP_MINUTES = 3;
+const ALL_SATELLITE_TRACE_WIDTH = 2;
+const ALL_SATELLITE_CATEGORY_TOGGLES = {
+    starlink: 'toggle-sat-starlink',
+    oneweb: 'toggle-sat-oneweb',
+    navigation: 'toggle-sat-navigation',
+    earth: 'toggle-sat-earth',
+    other: 'toggle-sat-other'
+};
+const ALL_SATELLITE_CATEGORY_LABELS = {
+    starlink: 'Starlink',
+    oneweb: 'OneWeb',
+    navigation: 'Navigation',
+    earth: 'Vejr og jord',
+    other: 'Øvrige satellitter'
+};
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
 const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -117,7 +145,7 @@ const satellites = {
     }
 };
 
-const TLE_SOURCE_URL = 'https://celestrak.com/NORAD/elements/stations.txt';
+const TLE_SOURCE_URL = '/api/tle/stations';
 const tleCache = {};
 const tleFallback = {
     'CSS (TIANHE)': {
@@ -171,6 +199,17 @@ function registerSearchItem(type, label, entity, keywords = '', details = '', ke
     searchableItems.push(item);
 }
 
+function unregisterSearchItem(key) {
+    const item = searchableByKey.get(key);
+    if (!item) return;
+
+    searchableByKey.delete(key);
+    const index = searchableItems.indexOf(item);
+    if (index >= 0) {
+        searchableItems.splice(index, 1);
+    }
+}
+
 function getItemEntity(item) {
     return item && (item.entity || item);
 }
@@ -217,7 +256,6 @@ function applyVisibleSideScope() {
     setScopedEntityVisibility(airportEntities, isLayerChecked('toggle-airports'), occluder);
     setScopedEntityVisibility(liveShipEntities, isLayerChecked('toggle-ship-traffic'), occluder);
     setScopedEntityVisibility(planeEntities, isLayerChecked('toggle-planes'), occluder);
-    setScopedEntityVisibility(airportEntities, isLayerChecked('toggle-airports'), occluder);
     setScopedEntityVisibility(militaryEntities, isLayerChecked('toggle-military'), occluder);
 }
 
@@ -385,10 +423,34 @@ let aisLastSubscriptionAt = 0;
 let aisLastScopeKey = '';
 let aisCacheWriteTimer = null;
 let shipLabelRefreshTimer = null;
+let lastAltitudeDisplayUpdateAt = 0;
+let lastAltitudeDisplayText = '';
+let allSatellitePointCollection = null;
+let allSatelliteRecords = [];
+let allSatelliteTraceEntity = null;
+let selectedAllSatelliteRecord = null;
+let isLoadingAllSatellites = false;
+let allSatellitesUpdateTimer = null;
 const shipStaticByMmsi = new Map();
 
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
+}
+
+function debounce(fn, delayMs) {
+    let timer = null;
+    return (...args) => {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => fn(...args), delayMs);
+    };
+}
+
+function addOptionalEventListener(id, eventName, handler) {
+    const element = document.getElementById(id);
+    if (element) {
+        element.addEventListener(eventName, handler);
+    }
+    return element;
 }
 
 function snapDown(value, step) {
@@ -618,6 +680,22 @@ async function loadTLEData() {
     }
 }
 
+function parseTleRecords(text) {
+    const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    const records = [];
+
+    for (let i = 0; i + 2 < lines.length; i += 3) {
+        const name = lines[i];
+        const line1 = lines[i + 1];
+        const line2 = lines[i + 2];
+        if (name && line1 && line2 && line1.startsWith('1 ') && line2.startsWith('2 ')) {
+            records.push({ name, line1, line2 });
+        }
+    }
+
+    return records;
+}
+
 function getSatelliteGmst(date) {
     if (typeof SatelliteLib.gstimeFromDate === 'function') {
         return SatelliteLib.gstimeFromDate(date);
@@ -640,6 +718,276 @@ function findTLE(key) {
         }
     }
     return null;
+}
+
+function setAllSatellitesVisible(visible) {
+    if (allSatellitePointCollection) {
+        allSatellitePointCollection.show = visible;
+    }
+
+    if (visible && allSatelliteRecords.length === 0) {
+        loadAllSatellitesLayer();
+    }
+
+    updateAllSatelliteCategoryVisibility();
+}
+
+function getAllSatelliteCategory(record) {
+    const name = normalizeSearchText(record.name);
+    if (name.includes('starlink')) return 'starlink';
+    if (name.includes('oneweb')) return 'oneweb';
+    if (
+        name.includes('gps') ||
+        name.includes('navstar') ||
+        name.includes('galileo') ||
+        name.includes('glonass') ||
+        name.includes('beidou') ||
+        name.includes('qzss') ||
+        name.includes('sbas')
+    ) {
+        return 'navigation';
+    }
+    if (
+        name.includes('noaa') ||
+        name.includes('meteor') ||
+        name.includes('metop') ||
+        name.includes('goes') ||
+        name.includes('himawari') ||
+        name.includes('fengyun') ||
+        name.includes('landsat') ||
+        name.includes('sentinel') ||
+        name.includes('terra') ||
+        name.includes('aqua') ||
+        name.includes('suomi')
+    ) {
+        return 'earth';
+    }
+    return 'other';
+}
+
+function isAllSatelliteCategoryVisible(category) {
+    return isLayerChecked('toggle-all-satellites') && isLayerChecked(ALL_SATELLITE_CATEGORY_TOGGLES[category]);
+}
+
+function updateAllSatelliteCategoryVisibility() {
+    allSatelliteRecords.forEach(record => {
+        if (record.point) {
+            record.point.show = Boolean(record.hasPosition && isAllSatelliteCategoryVisible(record.category));
+        }
+    });
+    refreshAllSatelliteTrace();
+}
+
+function formatAllSatelliteDetails(record) {
+    if (!record) return 'Satellit';
+
+    let latitude = '-';
+    let longitude = '-';
+    let altitude = '-';
+
+    if (record.point && hasValidCartesian(record.point.position)) {
+        const cartographic = CesiumLib.Cartographic.fromCartesian(record.point.position);
+        latitude = `${formatNumber(CesiumLib.Math.toDegrees(cartographic.latitude), 2)}°`;
+        longitude = `${formatNumber(CesiumLib.Math.toDegrees(cartographic.longitude), 2)}°`;
+        altitude = `${formatNumber(cartographic.height / 1000, 1)} km`;
+    }
+
+    return [
+        'Satellit',
+        `Kategori: ${ALL_SATELLITE_CATEGORY_LABELS[record.category] || 'Ukendt'}`,
+        `Navn: ${record.name}`,
+        `Højde: ${altitude}`,
+        `Breddegrad: ${latitude}`,
+        `Længdegrad: ${longitude}`
+    ].join('<br>');
+}
+
+function getAllSatelliteColor(record) {
+    if (record.category === 'starlink') return Cesium.Color.CYAN.withAlpha(0.78);
+    if (record.category === 'oneweb') return Cesium.Color.LIME.withAlpha(0.72);
+    if (record.category === 'navigation') return Cesium.Color.YELLOW.withAlpha(0.78);
+    if (record.category === 'earth') {
+        return Cesium.Color.ORANGE.withAlpha(0.76);
+    }
+    return Cesium.Color.WHITE.withAlpha(0.68);
+}
+
+function propagateSatelliteRecord(record, date, gmst) {
+    const propagated = SatelliteLib.propagate(record.satrec, date);
+    if (!propagated || !propagated.position) return null;
+
+    const positionGd = SatelliteLib.eciToGeodetic(propagated.position, gmst);
+    const longitude = SatelliteLib.degreesLong(positionGd.longitude);
+    const latitude = SatelliteLib.degreesLat(positionGd.latitude);
+    const altitudeMeters = Number(positionGd.height) * 1000;
+    if (!hasFiniteNumbers(longitude, latitude, altitudeMeters)) return null;
+
+    return CesiumLib.Cartesian3.fromDegrees(longitude, latitude, altitudeMeters);
+}
+
+function buildAllSatelliteTracePositions(record) {
+    if (!record || !record.satrec) return [];
+
+    const positions = [];
+    const now = Date.now();
+    for (
+        let minute = -ALL_SATELLITE_TRACE_PAST_MINUTES;
+        minute <= ALL_SATELLITE_TRACE_FUTURE_MINUTES;
+        minute += ALL_SATELLITE_TRACE_STEP_MINUTES
+    ) {
+        const date = new Date(now + minute * 60 * 1000);
+        const position = propagateSatelliteRecord(record, date, getSatelliteGmst(date));
+        if (position) {
+            positions.push(position);
+        }
+    }
+
+    return positions;
+}
+
+function clearAllSatelliteTrace() {
+    selectedAllSatelliteRecord = null;
+    if (allSatelliteTraceEntity) {
+        allSatelliteTraceEntity.show = false;
+    }
+}
+
+function showAllSatelliteTrace(record) {
+    selectedAllSatelliteRecord = record;
+    const visible = record && record.hasPosition && isAllSatelliteCategoryVisible(record.category);
+    const positions = visible ? buildAllSatelliteTracePositions(record) : [];
+
+    if (positions.length < 2) {
+        if (allSatelliteTraceEntity) {
+            allSatelliteTraceEntity.show = false;
+        }
+        return;
+    }
+
+    const color = getAllSatelliteColor(record).withAlpha(0.7);
+    if (!allSatelliteTraceEntity) {
+        allSatelliteTraceEntity = viewer.entities.add({
+            name: `Satellitspor: ${record.name}`,
+            show: true,
+            polyline: {
+                positions,
+                width: ALL_SATELLITE_TRACE_WIDTH,
+                material: new CesiumLib.PolylineGlowMaterialProperty({
+                    glowPower: 0.12,
+                    color
+                })
+            },
+            description: formatAllSatelliteDetails(record)
+        });
+        return;
+    }
+
+    allSatelliteTraceEntity.name = `Satellitspor: ${record.name}`;
+    allSatelliteTraceEntity.description = formatAllSatelliteDetails(record);
+    allSatelliteTraceEntity.polyline.positions = positions;
+    allSatelliteTraceEntity.polyline.material = new CesiumLib.PolylineGlowMaterialProperty({
+        glowPower: 0.12,
+        color
+    });
+    allSatelliteTraceEntity.show = true;
+}
+
+function refreshAllSatelliteTrace() {
+    if (!selectedAllSatelliteRecord) return;
+    showAllSatelliteTrace(selectedAllSatelliteRecord);
+}
+
+function updateAllSatellitesLayer(startIndex = 0, date = new Date(), gmst = getSatelliteGmst(date)) {
+    if (!allSatellitePointCollection || allSatelliteRecords.length === 0) return;
+
+    const endIndex = Math.min(startIndex + ALL_SATELLITES_BATCH_SIZE, allSatelliteRecords.length);
+    for (let i = startIndex; i < endIndex; i += 1) {
+        const record = allSatelliteRecords[i];
+        const position = propagateSatelliteRecord(record, date, gmst);
+        if (position && record.point) {
+            record.point.position = position;
+            record.hasPosition = true;
+            record.point.show = isAllSatelliteCategoryVisible(record.category);
+        } else if (record.point) {
+            record.hasPosition = false;
+            record.point.show = false;
+        }
+    }
+
+    if (endIndex < allSatelliteRecords.length) {
+        window.requestAnimationFrame(() => updateAllSatellitesLayer(endIndex, date, gmst));
+        return;
+    }
+
+    setDataStatus('status-tle', 'ok', `${allSatelliteRecords.length} sat`);
+    refreshAllSatelliteTrace();
+}
+
+function scheduleAllSatellitesUpdate() {
+    window.clearInterval(allSatellitesUpdateTimer);
+    allSatellitesUpdateTimer = window.setInterval(() => {
+        if (isLayerChecked('toggle-all-satellites')) {
+            updateAllSatellitesLayer();
+        }
+    }, ALL_SATELLITES_UPDATE_INTERVAL_MS);
+}
+
+async function loadAllSatellitesLayer() {
+    if (isLoadingAllSatellites || allSatelliteRecords.length > 0) return;
+
+    isLoadingAllSatellites = true;
+    setDataStatus('status-tle', 'warn', 'Henter alle');
+
+    try {
+        const response = await fetch(ALL_SATELLITES_TLE_URL);
+        if (!response.ok) {
+            setDataStatus('status-tle', 'error', `Fejl ${response.status}`);
+            return;
+        }
+
+        const records = parseTleRecords(await response.text())
+            .map(record => {
+                try {
+                    return {
+                        ...record,
+                        satrec: SatelliteLib.twoline2satrec(record.line1, record.line2),
+                        category: getAllSatelliteCategory(record),
+                        hasPosition: false,
+                        point: null
+                    };
+                } catch (e) {
+                    return null;
+                }
+            })
+            .filter(Boolean);
+
+        if (!allSatellitePointCollection) {
+            allSatellitePointCollection = viewer.scene.primitives.add(new Cesium.PointPrimitiveCollection());
+        }
+
+        allSatellitePointCollection.removeAll();
+        allSatelliteRecords = records;
+        allSatelliteRecords.forEach(record => {
+            record.point = allSatellitePointCollection.add({
+                position: CesiumLib.Cartesian3.ZERO,
+                pixelSize: ALL_SATELLITES_POINT_SIZE,
+                color: getAllSatelliteColor(record),
+                outlineColor: CesiumLib.Color.BLACK.withAlpha(0.7),
+                outlineWidth: 1,
+                id: { allSatelliteRecord: record },
+                show: false
+            });
+        });
+
+        allSatellitePointCollection.show = isLayerChecked('toggle-all-satellites');
+        updateAllSatellitesLayer();
+        scheduleAllSatellitesUpdate();
+    } catch (error) {
+        setDataStatus('status-tle', 'error', 'Fejl');
+        console.warn('Kunne ikke hente alle satellitter:', error);
+    } finally {
+        isLoadingAllSatellites = false;
+    }
 }
 
 function formatNumber(value, digits) {
@@ -704,6 +1052,15 @@ function setShipTrailsVisible(visible) {
     });
 }
 
+function removeLiveShip(mmsi, ship) {
+    if (!ship) return;
+    viewer.entities.remove(ship.entity);
+    if (ship.trailEntity) viewer.entities.remove(ship.trailEntity);
+    liveShipEntities.delete(mmsi);
+    shipStaticByMmsi.delete(mmsi);
+    unregisterSearchItem(`ship:${mmsi}`);
+}
+
 function loadWatchlist() {
     try {
         const raw = localStorage.getItem(WATCHLIST_KEY);
@@ -747,6 +1104,18 @@ function updateAisLiveStatus(fallbackState = 'ok', fallbackText = 'Forbundet') {
     }
 
     setDataStatus('status-ais', fallbackState, fallbackText);
+}
+
+function pruneLiveAisShips() {
+    if (liveShipEntities.size <= AIS_MAX_LIVE_SHIPS) return false;
+
+    const overflow = liveShipEntities.size - AIS_MAX_LIVE_SHIPS;
+    Array.from(liveShipEntities.entries())
+        .sort((a, b) => Number(a[1].lastSeen || 0) - Number(b[1].lastSeen || 0))
+        .slice(0, overflow)
+        .forEach(([mmsi, ship]) => removeLiveShip(mmsi, ship));
+
+    return overflow > 0;
 }
 
 function findSearchItemForWatch(value) {
@@ -908,12 +1277,27 @@ function hideDetailPanel() {
     const panel = document.getElementById('detail-panel');
     if (panel) panel.style.display = 'none';
     selectedDetailItem = null;
+    clearAllSatelliteTrace();
 }
 
 function initDetailPicking() {
     viewer.screenSpaceEventHandler.setInputAction(click => {
         const picked = viewer.scene.pick(click.position);
-        if (!Cesium.defined(picked) || !picked.id) return;
+        if (!Cesium.defined(picked)) return;
+
+        const satelliteRecord = picked.id && picked.id.allSatelliteRecord;
+        if (satelliteRecord) {
+            showAllSatelliteTrace(satelliteRecord);
+            showDetailPanel(
+                satelliteRecord.name,
+                formatAllSatelliteDetails(satelliteRecord),
+                satelliteRecord.name,
+                'Satellit'
+            );
+            return;
+        }
+
+        if (!picked.id) return;
 
         const entity = picked.id;
         const item = searchableItems.find(candidate => candidate.entity === entity);
@@ -1184,6 +1568,39 @@ function appendShipTrailPoint(ship, position) {
     }
 }
 
+function resetShipTrail(ship, position) {
+    if (!ship || !hasValidCartesian(position)) return;
+
+    ship.history = [position];
+    if (ship.trailEntity) {
+        ship.trailEntity.polyline.positions = [position];
+        ship.trailEntity.show = false;
+    }
+}
+
+function shouldResetShipTrail(ship, nextPosition, nextSpeed, nowMs) {
+    if (!ship || !hasValidCartesian(nextPosition) || !ship.history || ship.history.length === 0) {
+        return false;
+    }
+
+    const previousPosition = ship.history[ship.history.length - 1];
+    const distanceMeters = Cesium.Cartesian3.distance(previousPosition, nextPosition);
+    const elapsedMs = nowMs - Number(ship.lastSeen || 0);
+    if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return false;
+
+    if (elapsedMs > SHIP_TRAIL_RESET_AFTER_MS) return true;
+
+    const previousSpeed = hasFiniteNumbers(ship.speed) ? Number(ship.speed) : 0;
+    const reportedSpeed = hasFiniteNumbers(nextSpeed) ? Number(nextSpeed) : 0;
+    const allowedSpeedKn = Math.max(previousSpeed, reportedSpeed, SHIP_TRAIL_MAX_REASONABLE_SPEED_KN);
+    const allowedMeters = Math.max(
+        SHIP_TRAIL_MAX_JUMP_M,
+        allowedSpeedKn * 0.514444 * (elapsedMs / 1000) * 2
+    );
+
+    return distanceMeters > allowedMeters;
+}
+
 function createLiveShipEntity({ mmsi, name, lon, lat, course, speed, description, lastSeen }) {
     const position = CesiumLib.Cartesian3.fromDegrees(lon, lat, SHIP_MARKER_HEIGHT_METERS);
     if (!hasValidCartesian(position)) return null;
@@ -1278,7 +1695,7 @@ function hideSatelliteInfoPanel() {
     }
 }
 
-// 3. FUNKTION: INITIALISÃ‰R SATELLITTER
+// 3. FUNKTION: INITIALISÉR SATELLITTER
 function sendAisSubscription(force = false) {
     if (!aisSocket || aisSocket.readyState !== WebSocket.OPEN || !isLayerChecked('toggle-ship-traffic')) {
         return;
@@ -1454,13 +1871,15 @@ function upsertAisShip(aisData) {
 
     if (liveShipEntities.has(mmsi)) {
         const ship = liveShipEntities.get(mmsi);
+        const now = Date.now();
+        const resetTrail = shouldResetShipTrail(ship, position, speed, now);
         ship.entity.position = position;
         ship.entity.show = isLayerChecked('toggle-ship-traffic');
         ship.entity.name = name;
         ship.entity.description = description;
         ship.entity.label.text = formatShipLabel(name);
         ship.entity.billboard.rotation = getBillboardRotationFromHeading(course);
-        ship.lastSeen = Date.now();
+        ship.lastSeen = now;
         ship.lat = lat;
         ship.lon = lon;
         ship.course = course;
@@ -1469,8 +1888,13 @@ function upsertAisShip(aisData) {
         ship.shipType = staticData.shipType || '';
         ship.name = name;
         ship.description = description;
-        appendShipTrailPoint(ship, position);
+        if (resetTrail) {
+            resetShipTrail(ship, position);
+        } else {
+            appendShipTrailPoint(ship, position);
+        }
         registerSearchItem('Skib', name, ship.entity, `${mmsi} ${staticData.destination || ''} ${staticData.shipType || ''}`, description, `ship:${mmsi}`);
+        pruneLiveAisShips();
         scheduleAisCacheWrite();
         scheduleShipLabelRefresh();
         updateAisLiveStatus();
@@ -1494,6 +1918,7 @@ function upsertAisShip(aisData) {
         created.shipType = staticData.shipType || '';
         registerSearchItem('Skib', name, created.entity, `${mmsi} ${created.destination} ${created.shipType}`, description, `ship:${mmsi}`);
     }
+    pruneLiveAisShips();
     scheduleAisCacheWrite();
     scheduleShipLabelRefresh();
     updateAisLiveStatus();
@@ -1504,10 +1929,7 @@ function cleanupStaleAisShips() {
     let removedAny = false;
     liveShipEntities.forEach((ship, mmsi) => {
         if (now - ship.lastSeen <= AIS_STALE_MS) return;
-        viewer.entities.remove(ship.entity);
-        if (ship.trailEntity) viewer.entities.remove(ship.trailEntity);
-        liveShipEntities.delete(mmsi);
-        shipStaticByMmsi.delete(mmsi);
+        removeLiveShip(mmsi, ship);
         removedAny = true;
     });
     if (removedAny) {
@@ -1580,6 +2002,7 @@ function restoreAisShipCache() {
                 restored.shipType = ship.shipType || '';
             }
         });
+        pruneLiveAisShips();
         refreshVisibleSideScope();
         updateAisLiveStatus('warn', 'Cache');
     } catch (e) {
@@ -1592,7 +2015,30 @@ async function parseWebSocketJsonMessage(data) {
     return JSON.parse(text);
 }
 
+function closeAIS() {
+    window.clearTimeout(aisReconnectTimer);
+    window.clearTimeout(aisSubscriptionTimer);
+    aisLastScopeKey = '';
+
+    if (aisSocket) {
+        const socket = aisSocket;
+        aisSocket = null;
+        socket.close();
+    }
+
+    setDataStatus('status-ais', 'warn', 'Slukket');
+}
+
 function connectAIS() {
+    if (!isLayerChecked('toggle-ship-traffic')) {
+        closeAIS();
+        return;
+    }
+
+    if (aisSocket && (aisSocket.readyState === WebSocket.OPEN || aisSocket.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
     if (!AIS_API_KEY) {
         setDataStatus('status-ais', 'error', 'Mangler key');
         console.warn('AIS API key mangler.');
@@ -1618,8 +2064,6 @@ function connectAIS() {
                 console.warn('AISStream svar:', aisData.error);
                 return;
             }
-            const mmsi = getAisMmsi(aisData);
-            updateAisStaticData(mmsi, aisData);
             upsertAisShip(aisData);
             cleanupStaleAisShips();
         } catch (e) {
@@ -1628,6 +2072,12 @@ function connectAIS() {
     });
 
     aisSocket.addEventListener('close', () => {
+        if (!isLayerChecked('toggle-ship-traffic')) {
+            setDataStatus('status-ais', 'warn', 'Slukket');
+            return;
+        }
+
+        aisSocket = null;
         updateAisLiveStatus('warn', 'Genopretter');
         aisReconnectTimer = window.setTimeout(connectAIS, AIS_RECONNECT_MS);
     });
@@ -1806,7 +2256,7 @@ function initSatellites() {
     for (let key in satellites) {
         const sat = satellites[key];
 
-        // GÃ¸r banen blÃ¸d/buet
+        // Gør banen blød/buet
         sat.posProperty.setInterpolationOptions({
             interpolationDegree: 1,
             interpolationAlgorithm: CesiumLib.LinearApproximation
@@ -1842,12 +2292,14 @@ function initSatellites() {
 window.flyToSat = function(key) {
     const sat = satellites[key];
     if (sat && sat.entity) {
-        viewer.trackedEntity = sat.entity; // LÃ¥ser kameraet til satellitten
+        viewer.trackedEntity = sat.entity; // Låser kameraet til satellitten
     }
 };
 
 // 5. FUNKTION: HENT LIVE SATELLIT DATA
 async function updateSatelliteData() {
+    if (!isLayerChecked('toggle-sat')) return;
+
     const now = CesiumLib.JulianDate.now();
     for (let key in satellites) {
         const sat = satellites[key];
@@ -2370,59 +2822,164 @@ function initMaritimeLayers() {
 }
 
 // 8. EVENT LISTENERS: TOGGLE LAYERS
-document.getElementById('toggle-sat').addEventListener('change', e => {
+const debouncedScopeRefresh = debounce(refreshVisibleSideScope, UI_INPUT_DEBOUNCE_MS);
+const debouncedSearch = debounce(runSearch, UI_INPUT_DEBOUNCE_MS);
+const layerGroups = [
+    {
+        parentId: 'toggle-space-air',
+        children: [
+            'toggle-sat',
+            'toggle-all-satellites',
+            ...Object.values(ALL_SATELLITE_CATEGORY_TOGGLES),
+            'toggle-airports',
+            'toggle-planes'
+        ]
+    },
+    {
+        parentId: 'toggle-water',
+        children: ['toggle-ships', 'toggle-ship-traffic', 'toggle-ship-trails', 'toggle-military']
+    },
+    {
+        parentId: 'toggle-nature-light',
+        children: ['toggle-quakes', 'toggle-weather', 'toggle-daynight']
+    }
+];
+
+function setCheckboxState(id, checked) {
+    const element = document.getElementById(id);
+    if (element) {
+        element.checked = checked;
+        element.indeterminate = false;
+    }
+}
+
+function syncLayerGroupState(group) {
+    const parent = document.getElementById(group.parentId);
+    if (!parent) return;
+
+    const children = group.children
+        .map(id => document.getElementById(id))
+        .filter(Boolean);
+    const checkedCount = children.filter(child => child.checked).length;
+
+    parent.checked = children.length > 0 && checkedCount === children.length;
+    parent.indeterminate = checkedCount > 0 && checkedCount < children.length;
+}
+
+function syncLayerGroupStates() {
+    layerGroups.forEach(syncLayerGroupState);
+}
+
+function applyLayerSideEffects() {
     refreshVisibleSideScope();
-});
-document.getElementById('toggle-quakes').addEventListener('change', e => {
-    refreshVisibleSideScope();
-});
-document.getElementById('toggle-ships').addEventListener('change', e => {
-    refreshVisibleSideScope();
-});
-document.getElementById('toggle-ship-traffic').addEventListener('change', e => {
-    refreshVisibleSideScope();
-    if (e.target.checked) {
+    setAllSatellitesVisible(isLayerChecked('toggle-all-satellites'));
+    setWeatherVisible(isLayerChecked('toggle-weather'));
+    setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
+    viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
+
+    if (isLayerChecked('toggle-ship-traffic')) {
+        connectAIS();
         sendAisSubscription(true);
+    } else {
+        closeAIS();
+    }
+
+    if (isLayerChecked('toggle-planes')) {
+        scheduleFlightUpdate(0);
+    }
+}
+
+function addLayerToggleListener(id, handler) {
+    addOptionalEventListener(id, 'change', event => {
+        handler(event);
+        syncLayerGroupStates();
+    });
+}
+
+layerGroups.forEach(group => {
+    addOptionalEventListener(group.parentId, 'change', event => {
+        group.children.forEach(id => setCheckboxState(id, event.target.checked));
+        applyLayerSideEffects();
+        syncLayerGroupStates();
+    });
+});
+
+addLayerToggleListener('toggle-sat', event => {
+    refreshVisibleSideScope();
+    if (event.target.checked) {
+        updateSatelliteData();
     }
 });
-document.getElementById('toggle-ship-trails').addEventListener('change', () => {
+addLayerToggleListener('toggle-all-satellites', event => {
+    Object.values(ALL_SATELLITE_CATEGORY_TOGGLES).forEach(id => setCheckboxState(id, event.target.checked));
+    setAllSatellitesVisible(event.target.checked);
+});
+Object.values(ALL_SATELLITE_CATEGORY_TOGGLES).forEach(id => {
+    addLayerToggleListener(id, event => {
+        const enabledCategoryCount = Object.values(ALL_SATELLITE_CATEGORY_TOGGLES)
+            .map(toggleId => document.getElementById(toggleId))
+            .filter(Boolean)
+            .filter(toggle => toggle.checked).length;
+
+        setCheckboxState('toggle-all-satellites', enabledCategoryCount > 0);
+        if (event.target.checked) {
+            setAllSatellitesVisible(true);
+        } else {
+            updateAllSatelliteCategoryVisibility();
+        }
+    });
+});
+addLayerToggleListener('toggle-quakes', event => {
+    if (event.target.checked && quakeEntities.length === 0) {
+        initEarthquakes();
+    }
+    refreshVisibleSideScope();
+});
+addLayerToggleListener('toggle-ships', refreshVisibleSideScope);
+addLayerToggleListener('toggle-ship-traffic', event => {
+    refreshVisibleSideScope();
+    if (event.target.checked) {
+        connectAIS();
+        sendAisSubscription(true);
+    } else {
+        closeAIS();
+    }
+});
+addLayerToggleListener('toggle-ship-trails', () => {
     setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
 });
-document.getElementById('toggle-planes').addEventListener('change', e => {
+addLayerToggleListener('toggle-planes', event => {
     refreshVisibleSideScope();
-    if (e.target.checked) {
+    if (event.target.checked) {
         scheduleFlightUpdate(0);
     }
 });
-document.getElementById('toggle-airports').addEventListener('change', e => {
-    refreshVisibleSideScope();
+addLayerToggleListener('toggle-airports', refreshVisibleSideScope);
+addLayerToggleListener('toggle-military', refreshVisibleSideScope);
+addLayerToggleListener('toggle-weather', event => {
+    setWeatherVisible(event.target.checked);
 });
-document.getElementById('toggle-military').addEventListener('change', e => {
-    refreshVisibleSideScope();
+addLayerToggleListener('toggle-daynight', event => {
+    viewer.scene.globe.enableLighting = event.target.checked;
 });
-document.getElementById('toggle-weather').addEventListener('change', e => {
-    setWeatherVisible(e.target.checked);
-});
-document.getElementById('toggle-daynight').addEventListener('change', e => {
-    viewer.scene.globe.enableLighting = e.target.checked;
-});
+syncLayerGroupStates();
 
 ['filter-ship-speed', 'filter-ship-type', 'filter-plane-altitude', 'filter-airport-type'].forEach(id => {
     const element = document.getElementById(id);
     if (element) {
-        element.addEventListener('input', refreshVisibleSideScope);
+        element.addEventListener('input', debouncedScopeRefresh);
         element.addEventListener('change', refreshVisibleSideScope);
     }
 });
 
-document.getElementById('search-box').addEventListener('input', runSearch);
-document.getElementById('add-watchlist-item').addEventListener('click', () => {
+addOptionalEventListener('search-box', 'input', debouncedSearch);
+addOptionalEventListener('add-watchlist-item', 'click', () => {
     addWatchlistItem(getInputValue('watchlist-input'));
     const input = document.getElementById('watchlist-input');
     if (input) input.value = '';
 });
-document.getElementById('close-detail-panel').addEventListener('click', hideDetailPanel);
-document.getElementById('detail-watch').addEventListener('click', () => {
+addOptionalEventListener('close-detail-panel', 'click', hideDetailPanel);
+addOptionalEventListener('detail-watch', 'click', () => {
     addWatchlistItem(selectedDetailItem);
 });
 
@@ -2433,11 +2990,21 @@ viewer.camera.moveEnd.addEventListener(() => {
     scheduleAisSubscription();
 });
 
-// 9. HÃ˜JDEMÃ…LER LOGIK
+// 9. HØJDEMÅLER LOGIK
 viewer.scene.postRender.addEventListener(() => {
+    const now = performance.now();
+    if (now - lastAltitudeDisplayUpdateAt < ALTITUDE_DISPLAY_UPDATE_MS) return;
+
     const cameraHeight = viewer.camera.positionCartographic.height;
-    const heightInKm = (cameraHeight / 1000).toFixed(1);
-    document.getElementById('altitude-display').innerText = `HÃ¸jde: ${heightInKm} km`;
+    const text = `Højde: ${(cameraHeight / 1000).toFixed(1)} km`;
+    if (text === lastAltitudeDisplayText) return;
+
+    const altitudeDisplay = document.getElementById('altitude-display');
+    if (altitudeDisplay) {
+        altitudeDisplay.innerText = text;
+    }
+    lastAltitudeDisplayText = text;
+    lastAltitudeDisplayUpdateAt = now;
 });
 
 // KØR ALT VED START
@@ -2446,13 +3013,19 @@ loadWatchlist();
 viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
 initDetailPicking();
 initSatellites();
-initEarthquakes();
+if (isLayerChecked('toggle-quakes')) {
+    initEarthquakes();
+}
 initWeatherLayer();
 initMaritimeLayers();
 initAirports();
 restoreAisShipCache();
-connectAIS();
-scheduleFlightUpdate(0);
+if (isLayerChecked('toggle-ship-traffic')) {
+    connectAIS();
+}
+if (isLayerChecked('toggle-planes')) {
+    scheduleFlightUpdate(0);
+}
 updateSatelliteData();
 setInterval(updateSatelliteData, 5000);
 setInterval(() => scheduleFlightUpdate(0), FLIGHT_UPDATE_INTERVAL_MS);

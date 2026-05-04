@@ -46,6 +46,26 @@
             border-radius: 6px; color: #f2f6f7; font-size: 14px;
             background: rgba(255, 255, 255, 0.04);
         }
+        .layer-item.layer-parent {
+            min-height: 32px; margin-top: 6px; color: #9fb5bb; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; background: rgba(0, 255, 204, 0.12);
+            border-left: 3px solid #00ffcc;
+        }
+        .layer-item.layer-child {
+            margin-left: 18px; padding-left: 10px; position: relative;
+        }
+        .layer-item.layer-grandchild {
+            min-height: 30px; margin-left: 36px; padding-left: 10px; font-size: 13px; position: relative;
+            color: #d8eef2;
+        }
+        .layer-item.layer-child::before {
+            content: ""; position: absolute; left: -10px; top: 50%;
+            width: 10px; height: 1px; background: rgba(159, 181, 187, 0.55);
+        }
+        .layer-item.layer-grandchild::before {
+            content: ""; position: absolute; left: -10px; top: 50%;
+            width: 10px; height: 1px; background: rgba(159, 181, 187, 0.38);
+        }
         .layer-item:hover { background: rgba(255, 255, 255, 0.1); }
         .layer-item input {
             appearance: none; width: 36px; height: 20px; margin: 0; flex: 0 0 auto;
@@ -58,6 +78,8 @@
         }
         .layer-item input:checked { background: #2aa8b5; border-color: #5eeaf2; }
         .layer-item input:checked::after { transform: translateX(16px); }
+        .layer-item input:indeterminate { background: #7f8d63; border-color: #cdd99d; }
+        .layer-item input:indeterminate::after { transform: translateX(8px); }
         .tab-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 10px 0 12px; }
         .tab-button {
             width: auto; margin: 0; padding: 6px 4px; border-radius: 4px;
@@ -66,11 +88,28 @@
         .tab-button.active { background: #00ffcc; color: #061114; border-color: #00ffcc; }
         .tab-panel { display: none; }
         .tab-panel.active { display: block; }
+        #tab-filters.active { display: grid; gap: 7px; }
+        #tab-filters label {
+            display: block; margin: 0; color: #d8eef2; font-size: 13px; font-weight: 700;
+            line-height: 1.25;
+        }
+        #tab-filters input,
+        #tab-filters select,
+        #tab-search input {
+            display: block; width: 100%; min-width: 0; box-sizing: border-box;
+            background: rgba(0,0,0,0.42); color: #fff;
+            border: 1px solid #4b6870; border-radius: 4px; padding: 6px 7px;
+            font: inherit;
+        }
+        #tab-filters input,
+        #tab-filters select { margin: -3px 0 5px; }
         .control-group { margin-top: 12px; border-top: 1px solid rgba(255,255,255,0.22); padding-top: 10px; }
         .control-group label { display: block; margin: 7px 0 4px; font-size: 12px; color: #b7d5dc; }
         .control-group input, .control-group select {
+            display: block;
             width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.42);
             color: #fff; border: 1px solid #4b6870; border-radius: 4px; padding: 5px;
+            font: inherit;
         }
         #search-results { max-height: 120px; overflow-y: auto; margin-top: 6px; font-size: 12px; }
         .search-result { padding: 5px; border-bottom: 1px solid rgba(255,255,255,0.12); cursor: pointer; }
@@ -178,28 +217,34 @@
     <div class="tab-panel active" id="tab-layers">
         <p class="section-title">Kortlag</p>
         <div class="layer-group">
-            <p class="group-title">Rum og luft</p>
             <div class="layer-list">
-                <label class="layer-item"><span>Satellitter</span><input type="checkbox" id="toggle-sat" checked></label>
-                <label class="layer-item"><span>Lufthavne</span><input type="checkbox" id="toggle-airports" checked></label>
-                <label class="layer-item"><span>Flytrafik</span><input type="checkbox" id="toggle-planes" checked></label>
+                <label class="layer-item layer-parent"><span>Rum og luft</span><input type="checkbox" id="toggle-space-air"></label>
+                <label class="layer-item layer-child"><span>Satellitter</span><input type="checkbox" id="toggle-sat"></label>
+                <label class="layer-item layer-child"><span>Alle satellitter</span><input type="checkbox" id="toggle-all-satellites"></label>
+                <label class="layer-item layer-grandchild"><span>Starlink</span><input type="checkbox" id="toggle-sat-starlink"></label>
+                <label class="layer-item layer-grandchild"><span>OneWeb</span><input type="checkbox" id="toggle-sat-oneweb"></label>
+                <label class="layer-item layer-grandchild"><span>Navigation</span><input type="checkbox" id="toggle-sat-navigation"></label>
+                <label class="layer-item layer-grandchild"><span>Vejr og jord</span><input type="checkbox" id="toggle-sat-earth"></label>
+                <label class="layer-item layer-grandchild"><span>Øvrige satellitter</span><input type="checkbox" id="toggle-sat-other"></label>
+                <label class="layer-item layer-child"><span>Lufthavne</span><input type="checkbox" id="toggle-airports" checked></label>
+                <label class="layer-item layer-child"><span>Flytrafik</span><input type="checkbox" id="toggle-planes"></label>
             </div>
         </div>
         <div class="layer-group">
-            <p class="group-title">Vand</p>
             <div class="layer-list">
-                <label class="layer-item"><span>Civile havne</span><input type="checkbox" id="toggle-ships" checked></label>
-                <label class="layer-item"><span>Skibstrafik</span><input type="checkbox" id="toggle-ship-traffic" checked></label>
-                <label class="layer-item"><span>Skibsspor</span><input type="checkbox" id="toggle-ship-trails" checked></label>
-                <label class="layer-item"><span>Militær Flåde</span><input type="checkbox" id="toggle-military" checked></label>
+                <label class="layer-item layer-parent"><span>Vand</span><input type="checkbox" id="toggle-water"></label>
+                <label class="layer-item layer-child"><span>Civile havne</span><input type="checkbox" id="toggle-ships" checked></label>
+                <label class="layer-item layer-child"><span>Skibstrafik</span><input type="checkbox" id="toggle-ship-traffic"></label>
+                <label class="layer-item layer-child"><span>Skibsspor</span><input type="checkbox" id="toggle-ship-trails"></label>
+                <label class="layer-item layer-child"><span>Militær Flåde</span><input type="checkbox" id="toggle-military"></label>
             </div>
         </div>
         <div class="layer-group">
-            <p class="group-title">Natur og lys</p>
             <div class="layer-list">
-                <label class="layer-item"><span>Jordskælv</span><input type="checkbox" id="toggle-quakes" checked></label>
-                <label class="layer-item"><span>Vejr</span><input type="checkbox" id="toggle-weather"></label>
-                <label class="layer-item"><span>Dag/nat</span><input type="checkbox" id="toggle-daynight" checked></label>
+                <label class="layer-item layer-parent"><span>Natur og lys</span><input type="checkbox" id="toggle-nature-light"></label>
+                <label class="layer-item layer-child"><span>Jordskælv</span><input type="checkbox" id="toggle-quakes"></label>
+                <label class="layer-item layer-child"><span>Vejr</span><input type="checkbox" id="toggle-weather"></label>
+                <label class="layer-item layer-child"><span>Dag/nat</span><input type="checkbox" id="toggle-daynight"></label>
             </div>
         </div>
     </div>

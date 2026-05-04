@@ -10,12 +10,28 @@ import time
 PORT = 5600
 ROOT = Path(__file__).resolve().parent
 OPEN_SKY_URL = "https://opensky-network.org/api/states/all"
+AIRPORTS_SOURCE_URL = "https://davidmegginson.github.io/ourairports-data/airports.csv"
+TLE_SOURCES = {
+    "stations": [
+        "https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle",
+        "https://retlector.eu/tle/stations",
+    ],
+    "active": [
+        "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle",
+        "https://retlector.eu/tle/active",
+    ],
+}
 ALLOWED_FLIGHT_PARAMS = {"lamin", "lomin", "lamax", "lomax"}
 FLIGHT_CACHE_TTL_SECONDS = 60
 FLIGHT_ERROR_CACHE_TTL_SECONDS = 30
 FLIGHT_RATE_LIMIT_TTL_SECONDS = 120
+AIRPORT_CACHE_TTL_SECONDS = 24 * 60 * 60
+TLE_CACHE_TTL_SECONDS = 60 * 60
+TLE_CACHE_DIR = ROOT / ".cache"
 
 flight_cache = {}
+airport_cache = None
+tle_cache = {}
 open_sky_rate_limited_until = 0
 
 
@@ -61,6 +77,45 @@ def build_open_sky_query(path):
     return urlencode(params)
 
 
+def is_tle_body(body):
+    text = body.decode("utf-8", errors="ignore") if isinstance(body, bytes) else str(body or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return any(lines[i].startswith("1 ") and lines[i + 1].startswith("2 ") for i in range(len(lines) - 1))
+
+
+def read_tle_disk_cache(source_name):
+    path = TLE_CACHE_DIR / f"{source_name}.tle"
+    try:
+        body = path.read_bytes()
+        return body if is_tle_body(body) else None
+    except OSError:
+        return None
+
+
+def write_tle_disk_cache(source_name, body):
+    try:
+        TLE_CACHE_DIR.mkdir(exist_ok=True)
+        (TLE_CACHE_DIR / f"{source_name}.tle").write_bytes(body)
+    except OSError as error:
+        print(f"Kunne ikke gemme TLE-cache: {error}")
+
+
+def read_airport_disk_cache():
+    try:
+        body = (TLE_CACHE_DIR / "airports.csv").read_bytes()
+        return body if b"ident,type,name" in body[:200] else None
+    except OSError:
+        return None
+
+
+def write_airport_disk_cache(body):
+    try:
+        TLE_CACHE_DIR.mkdir(exist_ok=True)
+        (TLE_CACHE_DIR / "airports.csv").write_bytes(body)
+    except OSError as error:
+        print(f"Kunne ikke gemme lufthavns-cache: {error}")
+
+
 class MapRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
@@ -79,6 +134,12 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/flights"):
             self.proxy_flights()
+            return
+        if self.path.startswith("/api/airports"):
+            self.proxy_airports()
+            return
+        if self.path.startswith("/api/tle"):
+            self.proxy_tle()
             return
 
         if self.path == "/":
@@ -123,23 +184,122 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
                 open_sky_rate_limited_until = time.time() + FLIGHT_RATE_LIMIT_TTL_SECONDS
                 result = rate_limit_fallback(cached)
             else:
-                result = {
-                    "status": error.code,
-                    "body": error.read() or json.dumps({"error": "OpenSky request failed."}).encode("utf-8"),
-                    "headers": {"Content-Type": "application/json; charset=utf-8"},
-                    "expires_at": now + FLIGHT_ERROR_CACHE_TTL_SECONDS,
-                }
+                result = rate_limit_fallback(cached)
+                result["headers"]["X-Flight-Data-Source"] = f"opensky-http-{error.code}"
         except URLError as error:
-            message = json.dumps({"error": f"Kunne ikke hente flydata fra OpenSky: {error.reason}"}).encode("utf-8")
-            result = {
-                "status": 502,
-                "body": message,
-                "headers": {"Content-Type": "application/json; charset=utf-8"},
-                "expires_at": now + FLIGHT_ERROR_CACHE_TTL_SECONDS,
-            }
+            result = rate_limit_fallback(cached)
+            result["headers"]["X-Flight-Data-Source"] = "opensky-unavailable"
 
         flight_cache[cache_key] = result
         self.send_cached(result)
+
+    def proxy_airports(self):
+        global airport_cache
+
+        now = time.time()
+        if airport_cache and airport_cache.get("expires_at", 0) > now:
+            self.send_cached(airport_cache)
+            return
+
+        request = Request(
+            AIRPORTS_SOURCE_URL,
+            headers={"User-Agent": "SpaceEarthControlCenter/1.0 (local map app)"},
+        )
+
+        try:
+            with urlopen(request, timeout=15) as response:
+                body = response.read()
+            airport_cache = {
+                "status": 200,
+                "body": body,
+                "headers": {
+                    "Content-Type": "text/csv; charset=utf-8",
+                    "X-Airport-Data-Source": "ourairports",
+                },
+                "expires_at": now + AIRPORT_CACHE_TTL_SECONDS,
+            }
+            write_airport_disk_cache(body)
+            self.send_cached(airport_cache)
+            return
+        except (HTTPError, URLError, TimeoutError):
+            disk_body = read_airport_disk_cache()
+            if disk_body:
+                airport_cache = {
+                    "status": 200,
+                    "body": disk_body,
+                    "headers": {
+                        "Content-Type": "text/csv; charset=utf-8",
+                        "X-Airport-Data-Source": "disk-cache",
+                        "X-Airport-Stale": "true",
+                    },
+                    "expires_at": now + FLIGHT_ERROR_CACHE_TTL_SECONDS,
+                }
+                self.send_cached(airport_cache)
+                return
+
+        self.send_response(502)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Kunne ikke hente lufthavnsdata.".encode("utf-8"))
+
+    def proxy_tle(self):
+        source_name = "active" if urlparse(self.path).path.endswith("/active") else "stations"
+        cached = tle_cache.get(source_name)
+        now = time.time()
+
+        if cached and cached.get("expires_at", 0) > now:
+            self.send_cached(cached)
+            return
+
+        for url in TLE_SOURCES[source_name]:
+            request = Request(
+                url,
+                headers={
+                    "Accept": "text/plain,*/*",
+                    "User-Agent": "SpaceEarthControlCenter/1.0 (local map app)",
+                },
+            )
+            try:
+                with urlopen(request, timeout=15) as response:
+                    body = response.read()
+                if not is_tle_body(body):
+                    continue
+                result = {
+                    "status": 200,
+                    "body": body,
+                    "headers": {
+                        "Content-Type": "text/plain; charset=utf-8",
+                        "X-TLE-Data-Source": url,
+                    },
+                    "expires_at": now + TLE_CACHE_TTL_SECONDS,
+                }
+                tle_cache[source_name] = result
+                write_tle_disk_cache(source_name, body)
+                self.send_cached(result)
+                return
+            except (HTTPError, URLError, TimeoutError):
+                continue
+
+        disk_body = read_tle_disk_cache(source_name)
+        if disk_body:
+            result = {
+                "status": 200,
+                "body": disk_body,
+                "headers": {
+                    "Content-Type": "text/plain; charset=utf-8",
+                    "X-TLE-Data-Source": "disk-cache",
+                    "X-TLE-Stale": "true",
+                },
+                "expires_at": now + FLIGHT_ERROR_CACHE_TTL_SECONDS,
+            }
+            tle_cache[source_name] = result
+            self.send_cached(result)
+            return
+
+        self.send_response(502)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Kunne ikke hente TLE-data.".encode("utf-8"))
 
     def send_cached(self, result):
         self.send_response(result["status"])

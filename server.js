@@ -6,12 +6,26 @@ const PORT = Number(process.env.PORT || 5600);
 const ROOT = __dirname;
 const OPEN_SKY_URL = 'https://opensky-network.org/api/states/all';
 const AIRPORTS_SOURCE_URL = 'https://davidmegginson.github.io/ourairports-data/airports.csv';
+const TLE_SOURCES = {
+    stations: [
+        'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle',
+        'https://retlector.eu/tle/stations'
+    ],
+    active: [
+        'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle',
+        'https://retlector.eu/tle/active'
+    ]
+};
 const ALLOWED_FLIGHT_PARAMS = new Set(['lamin', 'lomin', 'lamax', 'lomax']);
 const FLIGHT_CACHE_TTL_MS = 60000;
 const FLIGHT_ERROR_CACHE_TTL_MS = 30000;
 const FLIGHT_RATE_LIMIT_TTL_MS = 120000;
 const AIRPORT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const TLE_CACHE_TTL_MS = 60 * 60 * 1000;
+const TLE_REQUEST_TIMEOUT_MS = 15000;
+const TLE_CACHE_DIR = path.join(ROOT, '.cache');
 const flightCache = new Map();
+const tleCache = new Map();
 let airportCache = null;
 let openSkyRateLimitedUntil = 0;
 
@@ -33,6 +47,41 @@ function send(response, statusCode, body, headers = {}) {
         ...headers
     });
     response.end(body);
+}
+
+function getTleCachePath(sourceName) {
+    return path.join(TLE_CACHE_DIR, `${sourceName}.tle`);
+}
+
+function isTleBody(body) {
+    const lines = String(body || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    for (let i = 0; i + 1 < lines.length; i += 1) {
+        if (lines[i].startsWith('1 ') && lines[i + 1].startsWith('2 ')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function readTleDiskCache(sourceName) {
+    try {
+        const body = fs.readFileSync(getTleCachePath(sourceName), 'utf8');
+        if (isTleBody(body)) {
+            return body;
+        }
+    } catch (error) {
+        return null;
+    }
+    return null;
+}
+
+function writeTleDiskCache(sourceName, body) {
+    try {
+        fs.mkdirSync(TLE_CACHE_DIR, { recursive: true });
+        fs.writeFileSync(getTleCachePath(sourceName), body, 'utf8');
+    } catch (error) {
+        console.warn('Kunne ikke gemme TLE-cache:', error.message);
+    }
 }
 
 function createEmptyFlightResult(reason = 'rate-limited') {
@@ -91,9 +140,8 @@ async function proxyFlights(request, response) {
             const pendingResult = await cached.pending;
             send(response, pendingResult.statusCode, pendingResult.body, pendingResult.headers);
         } catch (error) {
-            send(response, 502, JSON.stringify({ error: 'Kunne ikke hente flydata fra OpenSky.' }), {
-                'Content-Type': 'application/json; charset=utf-8'
-            });
+            const fallback = createEmptyFlightResult('opensky-unavailable');
+            send(response, fallback.statusCode, fallback.body, fallback.headers);
         }
         return;
     }
@@ -108,11 +156,22 @@ async function proxyFlights(request, response) {
             .then(async openSkyResponse => {
                 const body = await openSkyResponse.text();
                 const headers = {
-                    'Content-Type': openSkyResponse.headers.get('content-type') || 'application/json; charset=utf-8'
+                    'Content-Type': openSkyResponse.headers.get('content-type') || 'application/json; charset=utf-8',
+                    'X-Flight-Data-Source': 'opensky'
                 };
                 if (openSkyResponse.status === 429) {
                     openSkyRateLimitedUntil = Date.now() + FLIGHT_RATE_LIMIT_TTL_MS;
                     const fallback = createRateLimitFallback(cached);
+                    flightCache.set(cacheKey, fallback);
+                    return fallback;
+                }
+
+                if (!openSkyResponse.ok) {
+                    const fallback = createRateLimitFallback(cached);
+                    fallback.headers = {
+                        ...fallback.headers,
+                        'X-Flight-Data-Source': `opensky-http-${openSkyResponse.status}`
+                    };
                     flightCache.set(cacheKey, fallback);
                     return fallback;
                 }
@@ -139,9 +198,13 @@ async function proxyFlights(request, response) {
         send(response, result.statusCode, result.body, result.headers);
     } catch (error) {
         console.error('OpenSky proxy error:', error);
-        send(response, 502, JSON.stringify({ error: 'Kunne ikke hente flydata fra OpenSky.' }), {
-            'Content-Type': 'application/json; charset=utf-8'
-        });
+        const fallback = createRateLimitFallback(cached);
+        fallback.headers = {
+            ...fallback.headers,
+            'X-Flight-Data-Source': 'opensky-unavailable'
+        };
+        flightCache.set(cacheKey, fallback);
+        send(response, fallback.statusCode, fallback.body, fallback.headers);
     }
 }
 
@@ -169,6 +232,84 @@ async function proxyAirports(request, response) {
     } catch (error) {
         console.error('Airport proxy error:', error);
         send(response, 502, 'Kunne ikke hente lufthavnsdata.', {
+            'Content-Type': 'text/plain; charset=utf-8'
+        });
+    }
+}
+
+async function proxyTle(request, response) {
+    const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+    const sourceName = requestUrl.pathname.endsWith('/active') ? 'active' : 'stations';
+    const sourceUrls = TLE_SOURCES[sourceName];
+    const cached = tleCache.get(sourceName);
+    const now = Date.now();
+
+    if (cached && cached.expiresAt > now) {
+        send(response, cached.statusCode, cached.body, cached.headers);
+        return;
+    }
+
+    try {
+        let lastError = null;
+
+        for (const sourceUrl of sourceUrls) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), TLE_REQUEST_TIMEOUT_MS);
+            try {
+                const tleResponse = await fetch(sourceUrl, {
+                    signal: controller.signal,
+                    headers: {
+                        'Accept': 'text/plain,*/*',
+                        'User-Agent': 'SpaceEarthControlCenter/1.0 (local map app)'
+                    }
+                });
+                const body = await tleResponse.text();
+                if (!tleResponse.ok || !isTleBody(body)) {
+                    lastError = new Error(`TLE-kilde svarede ${tleResponse.status}`);
+                    continue;
+                }
+
+                const result = {
+                    statusCode: 200,
+                    body,
+                    headers: {
+                        'Content-Type': 'text/plain; charset=utf-8',
+                        'X-TLE-Data-Source': sourceUrl
+                    },
+                    expiresAt: now + TLE_CACHE_TTL_MS
+                };
+                tleCache.set(sourceName, result);
+                writeTleDiskCache(sourceName, body);
+                send(response, result.statusCode, result.body, result.headers);
+                return;
+            } catch (error) {
+                lastError = error;
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        const diskBody = readTleDiskCache(sourceName);
+        if (diskBody) {
+            const result = {
+                statusCode: 200,
+                body: diskBody,
+                headers: {
+                    'Content-Type': 'text/plain; charset=utf-8',
+                    'X-TLE-Data-Source': 'disk-cache',
+                    'X-TLE-Stale': 'true'
+                },
+                expiresAt: now + FLIGHT_ERROR_CACHE_TTL_MS
+            };
+            tleCache.set(sourceName, result);
+            send(response, result.statusCode, result.body, result.headers);
+            return;
+        }
+
+        throw lastError || new Error('Ingen TLE-kilder svarede.');
+    } catch (error) {
+        console.error('TLE proxy error:', error);
+        send(response, 502, 'Kunne ikke hente TLE-data.', {
             'Content-Type': 'text/plain; charset=utf-8'
         });
     }
@@ -213,6 +354,11 @@ const server = http.createServer((request, response) => {
 
     if (request.url.startsWith('/api/airports')) {
         proxyAirports(request, response);
+        return;
+    }
+
+    if (request.url.startsWith('/api/tle')) {
+        proxyTle(request, response);
         return;
     }
 
