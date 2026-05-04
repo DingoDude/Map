@@ -60,9 +60,10 @@ const ALL_SATELLITES_TLE_URL = '/api/tle/active';
 const ALL_SATELLITES_UPDATE_INTERVAL_MS = 30000;
 const ALL_SATELLITES_BATCH_SIZE = 250;
 const ALL_SATELLITES_POINT_SIZE = 5;
-const ALL_SATELLITE_TRACE_PAST_MINUTES = 45;
-const ALL_SATELLITE_TRACE_FUTURE_MINUTES = 90;
-const ALL_SATELLITE_TRACE_STEP_MINUTES = 3;
+const SATELLITE_FULL_ORBIT_SAMPLE_COUNT = 180;
+const SATELLITE_FULL_ORBIT_MIN_STEP_MINUTES = 0.5;
+const SATELLITE_FULL_ORBIT_MAX_STEP_MINUTES = 8;
+const SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES = 93;
 const ALL_SATELLITE_TRACE_WIDTH = 2;
 const ALL_SATELLITE_TRACE_ALL_LIMIT = 180;
 const ALL_SATELLITE_CATEGORY_TOGGLES = {
@@ -127,6 +128,7 @@ const satellites = {
         name: 'ISS (International)', 
         color: CesiumLib.Color.RED, 
         source: 'api',
+        tleName: 'ISS (ZARYA)',
         orbitPeriodMinutes: 93,
         facts: [
             'ISS er cirka på størrelse med en fodboldbane.',
@@ -444,6 +446,10 @@ let allSatelliteRecords = [];
 let allSatelliteTraceEntity = null;
 let allVisibleSatelliteTraceEntities = [];
 let selectedAllSatelliteRecord = null;
+let selectedTrackedSatelliteOrbitEntity = null;
+let visibleTrackedSatelliteOrbitEntities = new Map();
+let visibleTrackedSatelliteOrbitRefreshId = 0;
+let selectedTrackedSatelliteOrbitRequestId = 0;
 let isLoadingAllSatellites = false;
 let allSatellitesUpdateTimer = null;
 const shipStaticByMmsi = new Map();
@@ -662,11 +668,16 @@ function addSatelliteSample(sat, time, position, telemetry) {
     if (sat.entity) {
         sat.entity.show = true;
         sat.entity.satelliteTraceReady = sat.sampleCount >= 3;
-        sat.entity.path.show = isVisibleSatelliteTraceEnabled() && sat.entity.show && sat.entity.satelliteTraceReady;
+        sat.entity.path.show = false;
     }
 
     if (selectedSatelliteKey && satellites[selectedSatelliteKey] === sat) {
         updateSatelliteInfoPanel(selectedSatelliteKey);
+        showTrackedSatelliteOrbit(selectedSatelliteKey);
+    }
+
+    if (isVisibleSatelliteTraceEnabled()) {
+        refreshVisibleTrackedSatelliteOrbits();
     }
 }
 
@@ -908,8 +919,9 @@ function isVisibleSatelliteTraceEnabled() {
 }
 
 function getSatellitePanelTraceCount() {
-    const trackedTraceCount = satelliteEntities.filter(entity => entity.show && entity.path && entity.path.show).length;
+    const trackedTraceCount = Array.from(visibleTrackedSatelliteOrbitEntities.values()).filter(entity => entity.show).length;
     return trackedTraceCount +
+        (selectedTrackedSatelliteOrbitEntity && selectedTrackedSatelliteOrbitEntity.show ? 1 : 0) +
         allVisibleSatelliteTraceEntities.filter(entity => entity.show).length +
         (allSatelliteTraceEntity && allSatelliteTraceEntity.show ? 1 : 0);
 }
@@ -938,12 +950,23 @@ function updateSatelliteControlPanel() {
 }
 
 function updateTrackedSatelliteTraceVisibility() {
-    const showTraces = isVisibleSatelliteTraceEnabled();
     satelliteEntities.forEach(entity => {
         if (entity.path) {
-            entity.path.show = showTraces && entity.show && entity.satelliteTraceReady === true;
+            entity.path.show = false;
         }
     });
+
+    if (
+        selectedSatelliteKey &&
+        (!isLayerChecked('toggle-sat') ||
+            !satellites[selectedSatelliteKey] ||
+            !satellites[selectedSatelliteKey].entity ||
+            !satellites[selectedSatelliteKey].entity.show)
+    ) {
+        clearTrackedSatelliteOrbit();
+    }
+
+    refreshVisibleTrackedSatelliteOrbits();
     updateSatelliteControlPanel();
 }
 
@@ -999,24 +1022,52 @@ function propagateSatelliteRecord(record, date, gmst) {
     return CesiumLib.Cartesian3.fromDegrees(longitude, latitude, altitudeMeters);
 }
 
-function buildAllSatelliteTracePositions(record) {
-    if (!record || !record.satrec) return [];
+function getSatrecOrbitPeriodMinutes(satrec, fallbackMinutes = SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES) {
+    const meanMotionRadiansPerMinute = satrec && Number(satrec.no);
+    if (hasFiniteNumbers(meanMotionRadiansPerMinute) && meanMotionRadiansPerMinute > 0) {
+        return (Math.PI * 2) / meanMotionRadiansPerMinute;
+    }
+
+    return fallbackMinutes;
+}
+
+function getFullOrbitStepMinutes(periodMinutes) {
+    return clamp(
+        periodMinutes / SATELLITE_FULL_ORBIT_SAMPLE_COUNT,
+        SATELLITE_FULL_ORBIT_MIN_STEP_MINUTES,
+        SATELLITE_FULL_ORBIT_MAX_STEP_MINUTES
+    );
+}
+
+function buildFullOrbitPositionsFromSatrec(satrec, fallbackPeriodMinutes = SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES) {
+    if (!satrec) return [];
 
     const positions = [];
     const now = Date.now();
-    for (
-        let minute = -ALL_SATELLITE_TRACE_PAST_MINUTES;
-        minute <= ALL_SATELLITE_TRACE_FUTURE_MINUTES;
-        minute += ALL_SATELLITE_TRACE_STEP_MINUTES
-    ) {
+    const periodMinutes = getSatrecOrbitPeriodMinutes(satrec, fallbackPeriodMinutes);
+    const stepMinutes = getFullOrbitStepMinutes(periodMinutes);
+
+    for (let minute = 0; minute <= periodMinutes; minute += stepMinutes) {
         const date = new Date(now + minute * 60 * 1000);
-        const position = propagateSatelliteRecord(record, date, getSatelliteGmst(date));
+        const position = propagateSatelliteRecord({ satrec }, date, getSatelliteGmst(date));
         if (position) {
             positions.push(position);
         }
     }
 
+    const endDate = new Date(now + periodMinutes * 60 * 1000);
+    const endPosition = propagateSatelliteRecord({ satrec }, endDate, getSatelliteGmst(endDate));
+    if (endPosition) {
+        positions.push(endPosition);
+    }
+
     return positions;
+}
+
+function buildAllSatelliteTracePositions(record) {
+    if (!record || !record.satrec) return [];
+
+    return buildFullOrbitPositionsFromSatrec(record.satrec);
 }
 
 function clearAllSatelliteTrace() {
@@ -1024,6 +1075,138 @@ function clearAllSatelliteTrace() {
     if (allSatelliteTraceEntity) {
         allSatelliteTraceEntity.show = false;
     }
+    updateSatelliteControlPanel();
+}
+
+function clearTrackedSatelliteOrbit() {
+    selectedTrackedSatelliteOrbitRequestId += 1;
+    selectedSatelliteKey = null;
+    if (selectedTrackedSatelliteOrbitEntity) {
+        selectedTrackedSatelliteOrbitEntity.show = false;
+    }
+    updateSatelliteControlPanel();
+}
+
+async function getTrackedSatelliteSatrec(key) {
+    const sat = satellites[key];
+    if (!sat) return null;
+
+    let tle = findTLE(key);
+    if (!tle && Object.keys(tleCache).length === 0) {
+        await loadTLEData();
+        tle = findTLE(key);
+    }
+    if (!tle) return null;
+
+    try {
+        return SatelliteLib.twoline2satrec(tle.line1, tle.line2);
+    } catch (error) {
+        console.warn('Kunne ikke oprette TLE-bane for satellit:', sat.name, error);
+        return null;
+    }
+}
+
+async function buildTrackedSatelliteOrbitPositions(key) {
+    const sat = satellites[key];
+    const satrec = await getTrackedSatelliteSatrec(key);
+    if (!sat || !satrec) return [];
+
+    return buildFullOrbitPositionsFromSatrec(satrec, sat.orbitPeriodMinutes || SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES);
+}
+
+async function showTrackedSatelliteOrbit(key) {
+    const requestId = ++selectedTrackedSatelliteOrbitRequestId;
+    const sat = satellites[key];
+    if (!sat || !sat.entity || !sat.entity.show) {
+        clearTrackedSatelliteOrbit();
+        return;
+    }
+
+    selectedSatelliteKey = key;
+    const positions = await buildTrackedSatelliteOrbitPositions(key);
+    if (requestId !== selectedTrackedSatelliteOrbitRequestId || selectedSatelliteKey !== key) {
+        return;
+    }
+    if (positions.length < 2) {
+        if (selectedTrackedSatelliteOrbitEntity) {
+            selectedTrackedSatelliteOrbitEntity.show = false;
+        }
+        updateSatelliteControlPanel();
+        return;
+    }
+
+    if (!selectedTrackedSatelliteOrbitEntity) {
+        selectedTrackedSatelliteOrbitEntity = viewer.entities.add({
+            name: `Satellitbane: ${sat.name}`,
+            show: true,
+            polyline: {
+                positions,
+                arcType: CesiumLib.ArcType.NONE,
+                width: ALL_SATELLITE_TRACE_WIDTH + 1,
+                material: new CesiumLib.PolylineGlowMaterialProperty({
+                    glowPower: 0.14,
+                    color: sat.color.withAlpha(0.74)
+                })
+            },
+            description: sat.facts.join('<br>')
+        });
+    } else {
+        selectedTrackedSatelliteOrbitEntity.name = `Satellitbane: ${sat.name}`;
+        selectedTrackedSatelliteOrbitEntity.description = sat.facts.join('<br>');
+        selectedTrackedSatelliteOrbitEntity.polyline.positions = positions;
+        selectedTrackedSatelliteOrbitEntity.polyline.arcType = CesiumLib.ArcType.NONE;
+        selectedTrackedSatelliteOrbitEntity.polyline.material = new CesiumLib.PolylineGlowMaterialProperty({
+            glowPower: 0.14,
+            color: sat.color.withAlpha(0.74)
+        });
+        selectedTrackedSatelliteOrbitEntity.show = true;
+    }
+
+    updateSatelliteControlPanel();
+}
+
+function clearVisibleTrackedSatelliteOrbits() {
+    visibleTrackedSatelliteOrbitEntities.forEach(entity => viewer.entities.remove(entity));
+    visibleTrackedSatelliteOrbitEntities = new Map();
+}
+
+async function refreshVisibleTrackedSatelliteOrbits() {
+    const refreshId = ++visibleTrackedSatelliteOrbitRefreshId;
+    clearVisibleTrackedSatelliteOrbits();
+    satelliteEntities.forEach(entity => {
+        if (entity.path) {
+            entity.path.show = false;
+        }
+    });
+
+    if (!isVisibleSatelliteTraceEnabled() || !isLayerChecked('toggle-sat')) {
+        updateSatelliteControlPanel();
+        return;
+    }
+
+    for (const key in satellites) {
+        const sat = satellites[key];
+        if (!sat || !sat.entity || !sat.entity.show) continue;
+
+        const positions = await buildTrackedSatelliteOrbitPositions(key);
+        if (refreshId !== visibleTrackedSatelliteOrbitRefreshId || !isVisibleSatelliteTraceEnabled() || !isLayerChecked('toggle-sat')) {
+            return;
+        }
+        if (positions.length < 2) continue;
+
+        const entity = viewer.entities.add({
+            name: `Satellitbane: ${sat.name}`,
+            polyline: {
+                positions,
+                arcType: CesiumLib.ArcType.NONE,
+                width: 2,
+                material: sat.color.withAlpha(0.36)
+            },
+            description: sat.facts.join('<br>')
+        });
+        visibleTrackedSatelliteOrbitEntities.set(key, entity);
+    }
+
     updateSatelliteControlPanel();
 }
 
@@ -1046,6 +1229,7 @@ function showAllSatelliteTrace(record) {
             show: true,
             polyline: {
                 positions,
+                arcType: CesiumLib.ArcType.NONE,
                 width: ALL_SATELLITE_TRACE_WIDTH,
                 material: new CesiumLib.PolylineGlowMaterialProperty({
                     glowPower: 0.12,
@@ -1060,6 +1244,7 @@ function showAllSatelliteTrace(record) {
     allSatelliteTraceEntity.name = `Satellitspor: ${record.name}`;
     allSatelliteTraceEntity.description = formatAllSatelliteDetails(record);
     allSatelliteTraceEntity.polyline.positions = positions;
+    allSatelliteTraceEntity.polyline.arcType = CesiumLib.ArcType.NONE;
     allSatelliteTraceEntity.polyline.material = new CesiumLib.PolylineGlowMaterialProperty({
         glowPower: 0.12,
         color
@@ -1093,6 +1278,7 @@ function refreshAllVisibleSatelliteTraces() {
             name: `Satellitspor: ${record.name}`,
             polyline: {
                 positions,
+                arcType: CesiumLib.ArcType.NONE,
                 width: 1,
                 material: getAllSatelliteColor(record).withAlpha(0.24)
             },
@@ -1507,6 +1693,12 @@ function initDetailPicking() {
         if (!picked.id) return;
 
         const entity = picked.id;
+        if (entity.satelliteKey) {
+            updateSatelliteInfoPanel(entity.satelliteKey);
+            showTrackedSatelliteOrbit(entity.satelliteKey);
+            return;
+        }
+
         const item = searchableItems.find(candidate => candidate.entity === entity);
         if (item) {
             showDetailPanel(item.label, item.details || describeEntity(entity, item.type), item.label, item.type);
@@ -1895,7 +2087,7 @@ function updateSatelliteInfoPanel(key) {
 }
 
 function hideSatelliteInfoPanel() {
-    selectedSatelliteKey = null;
+    clearTrackedSatelliteOrbit();
     const panel = document.getElementById('satellite-info');
     if (panel) {
         panel.style.display = 'none';
@@ -2500,6 +2692,8 @@ window.flyToSat = function(key) {
     const sat = satellites[key];
     if (sat && sat.entity) {
         viewer.trackedEntity = sat.entity; // Låser kameraet til satellitten
+        updateSatelliteInfoPanel(key);
+        showTrackedSatelliteOrbit(key);
     }
 };
 
@@ -3184,7 +3378,9 @@ addLayerToggleListener('toggle-visible-satellite-traces', () => {
 });
 addOptionalEventListener('clear-satellite-trace', 'click', () => {
     clearAllSatelliteTrace();
+    clearTrackedSatelliteOrbit();
 });
+addOptionalEventListener('close-satellite-info', 'click', hideSatelliteInfoPanel);
 
 ['filter-ship-speed', 'filter-ship-type', 'filter-plane-altitude', 'filter-airport-type'].forEach(id => {
     const element = document.getElementById(id);
