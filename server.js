@@ -5,11 +5,14 @@ const path = require('path');
 const PORT = Number(process.env.PORT || 5600);
 const ROOT = __dirname;
 const OPEN_SKY_URL = 'https://opensky-network.org/api/states/all';
+const AIRPORTS_SOURCE_URL = 'https://davidmegginson.github.io/ourairports-data/airports.csv';
 const ALLOWED_FLIGHT_PARAMS = new Set(['lamin', 'lomin', 'lamax', 'lomax']);
 const FLIGHT_CACHE_TTL_MS = 60000;
 const FLIGHT_ERROR_CACHE_TTL_MS = 30000;
 const FLIGHT_RATE_LIMIT_TTL_MS = 120000;
+const AIRPORT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const flightCache = new Map();
+let airportCache = null;
 let openSkyRateLimitedUntil = 0;
 
 const contentTypes = {
@@ -142,6 +145,35 @@ async function proxyFlights(request, response) {
     }
 }
 
+async function proxyAirports(request, response) {
+    const now = Date.now();
+
+    if (airportCache && airportCache.expiresAt > now) {
+        send(response, airportCache.statusCode, airportCache.body, airportCache.headers);
+        return;
+    }
+
+    try {
+        const airportResponse = await fetch(AIRPORTS_SOURCE_URL);
+        const body = await airportResponse.text();
+        airportCache = {
+            statusCode: airportResponse.status,
+            body,
+            headers: {
+                'Content-Type': airportResponse.headers.get('content-type') || 'text/csv; charset=utf-8',
+                'X-Airport-Data-Source': 'ourairports'
+            },
+            expiresAt: now + (airportResponse.ok ? AIRPORT_CACHE_TTL_MS : FLIGHT_ERROR_CACHE_TTL_MS)
+        };
+        send(response, airportCache.statusCode, airportCache.body, airportCache.headers);
+    } catch (error) {
+        console.error('Airport proxy error:', error);
+        send(response, 502, 'Kunne ikke hente lufthavnsdata.', {
+            'Content-Type': 'text/plain; charset=utf-8'
+        });
+    }
+}
+
 function serveStatic(request, response) {
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
     const requestedPath = requestUrl.pathname === '/' ? '/map.html' : requestUrl.pathname;
@@ -176,6 +208,11 @@ const server = http.createServer((request, response) => {
 
     if (request.url.startsWith('/api/flights')) {
         proxyFlights(request, response);
+        return;
+    }
+
+    if (request.url.startsWith('/api/airports')) {
+        proxyAirports(request, response);
         return;
     }
 

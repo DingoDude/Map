@@ -1,39 +1,68 @@
-const CesiumLib = window.Cesium;
-const SatelliteLib = window.satellite;
-const viewer = createViewer('cesiumContainer');
-const {
-    AIS_API_KEY,
-    AIS_STREAM_URL,
-    AIS_RECONNECT_MS,
-    AIS_SUBSCRIPTION_DEBOUNCE_MS,
-    AIS_MIN_SUBSCRIPTION_GAP_MS,
-    AIS_VIEW_PADDING_DEGREES,
-    AIS_MAX_LAT_SPAN_DEGREES,
-    AIS_MAX_LON_SPAN_DEGREES,
-    AIS_STALE_MS,
-    AIS_CACHE_KEY,
-    AIS_CACHE_MAX_AGE_MS,
-    AIS_CACHE_WRITE_DEBOUNCE_MS,
-    AIS_CACHE_MAX_SHIPS,
-    LOCAL_PROXY_ORIGIN,
-    FLIGHT_UPDATE_INTERVAL_MS,
-    FLIGHT_STALE_MS,
-    FLIGHT_MAX_RESULTS,
-    FLIGHT_VIEW_PADDING_DEGREES,
-    FLIGHT_MIN_SCOPE_DEGREES,
-    FLIGHT_TRAIL_SECONDS,
-    FLIGHT_SCOPE_GRID_DEGREES,
-    FLIGHT_CAMERA_DEBOUNCE_MS,
-    FLIGHT_MIN_REQUEST_GAP_MS,
-    FLIGHT_RATE_LIMIT_BACKOFF_MS,
-    FLIGHT_GREEN_ALTITUDE_M,
-    FLIGHT_BLUE_ALTITUDE_M,
-    PLANE_ICON_HEADING_OFFSET_RADIANS,
-    SHIP_MARKER_HEIGHT_METERS,
-    ALWAYS_SHOW_OVER_TERRAIN,
-    PLANE_ICON,
-    SHIP_ICON
-} = window;
+// 1. DIN CESIUM ION TOKEN
+Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI5NTBiY2Q0NS02ZDc4LTRkOWEtYmIzYS0yZDdmM2MzMGU3NmIiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzY3NzIzODR9.pGxmdND27nVBk6Wi2I4t_dUYq1ytFnbmYnwLH53Vnro';
+const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
+const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
+const AIS_RECONNECT_MS = 10000;
+const AIS_SUBSCRIPTION_DEBOUNCE_MS = 600;
+const AIS_MIN_SUBSCRIPTION_GAP_MS = 1500;
+const AIS_VIEW_PADDING_DEGREES = 3;
+const AIS_MAX_LAT_SPAN_DEGREES = 45;
+const AIS_MAX_LON_SPAN_DEGREES = 75;
+const AIS_STALE_MS = 10 * 60 * 1000;
+const AIS_CACHE_KEY = 'space-control-live-ais-ships-v1';
+const AIS_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
+const AIS_CACHE_WRITE_DEBOUNCE_MS = 2500;
+const AIS_CACHE_MAX_SHIPS = 700;
+const AIS_LABEL_REFRESH_DEBOUNCE_MS = 150;
+const LOCAL_PROXY_ORIGIN = 'http://127.0.0.1:5600';
+const PERSIAN_GULF_VIEW = Cesium.Rectangle.fromDegrees(35.0, 20.0, 60.0, 34.0);
+const FLIGHT_UPDATE_INTERVAL_MS = 60000;
+const FLIGHT_STALE_MS = 180000;
+const FLIGHT_MAX_RESULTS = 160;
+const FLIGHT_VIEW_PADDING_DEGREES = 1.5;
+const FLIGHT_MIN_SCOPE_DEGREES = 1.0;
+const FLIGHT_TRAIL_SECONDS = 180;
+const FLIGHT_SCOPE_GRID_DEGREES = 0.5;
+const FLIGHT_CAMERA_DEBOUNCE_MS = 2000;
+const FLIGHT_MIN_REQUEST_GAP_MS = 30000;
+const FLIGHT_RATE_LIMIT_BACKOFF_MS = 120000;
+const FLIGHT_GREEN_ALTITUDE_M = 10000;
+const FLIGHT_BLUE_ALTITUDE_M = 15000;
+const AIRPORT_MAX_RESULTS = 1000;
+const AIRPORT_TYPE_RANK = {
+    large_airport: 0,
+    medium_airport: 1,
+    small_airport: 2
+};
+const ALWAYS_SHOW_BILLBOARD_DISTANCE = Number.POSITIVE_INFINITY;
+const SHIP_LABEL_MAX_DISTANCE_M = 1800000;
+const SHIP_LABEL_MAX_LENGTH = 20;
+const SHIP_LABEL_CHAR_WIDTH_PX = 6.4;
+const SHIP_LABEL_HEIGHT_PX = 16;
+const SHIP_LABEL_PADDING_PX = 5;
+const SHIP_ICON_COLLISION_PX = 18;
+const SHIP_TRAIL_MAX_POINTS = 24;
+const SHIP_TRAIL_MIN_DISTANCE_M = 60;
+const SHIP_SEARCH_FOCUS_HEIGHT_M = 35000;
+const WATCHLIST_KEY = 'space-control-watchlist-v1';
+const AIRPORT_LABEL_NEAR_DISTANCE_M = 900000;
+const AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M = 3500000;
+const PORT_MAX_CAMERA_HEIGHT_M = 5200000;
+
+// 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
+const viewer = new Cesium.Viewer('cesiumContainer', {
+    terrain: Cesium.Terrain.fromWorldTerrain(), // Den korrekte måde i nyere versioner
+    baseLayerPicker: true,
+    geocoder: false,
+    homeButton: false,
+    shouldAnimate: true
+});
+
+viewer.scene.globe.depthTestAgainstTerrain = true;
+
+viewer.camera.setView({
+    destination: PERSIAN_GULF_VIEW
+});
 
 // Lister til styring af lag (Layers)
 const satelliteEntities = [];
@@ -41,8 +70,14 @@ const quakeEntities = [];
 const shipEntities = [];
 const airportEntities = [];
 const militaryEntities = [];
+const airportEntities = [];
+const weatherEntities = [];
 const liveShipEntities = new Map();
 const planeEntities = new Map();
+const searchableItems = [];
+const searchableByKey = new Map();
+let watchlist = [];
+let selectedDetailItem = null;
 
 // Konfiguration af satellitter
 const satellites = {
@@ -53,9 +88,9 @@ const satellites = {
         source: 'api',
         orbitPeriodMinutes: 93,
         facts: [
-            'ISS er cirka pÃƒÂ¥ stÃƒÂ¸rrelse med en fodboldbane.',
+            'ISS er cirka på størrelse med en fodboldbane.',
             'Den har typisk 7 astronauter ombord.',
-            'Den ser omkring 16 solopgange i dÃƒÂ¸gnet.'
+            'Den ser omkring 16 solopgange i døgnet.'
         ],
         posProperty: new CesiumLib.SampledPositionProperty(),
         sampleCount: 0,
@@ -71,7 +106,7 @@ const satellites = {
         orbitPeriodMinutes: 92,
         facts: [
             'Tiangong betyder "Himmelsk Palads".',
-            'Rumstationen bestÃƒÂ¥r af modulerne Tianhe, Wentian og Mengtian.',
+            'Rumstationen består af modulerne Tianhe, Wentian og Mengtian.',
             'Den kredser lavt om Jorden, ligesom ISS.'
         ],
         posProperty: new CesiumLib.SampledPositionProperty(),
@@ -103,11 +138,48 @@ function isLayerChecked(id) {
     return !element || element.checked;
 }
 
-function setMapEntitiesVisible(entities, visible) {
-    entities.forEach(item => {
-        const entity = item.entity || item;
-        entity.show = visible;
-    });
+function getInputValue(id) {
+    const element = document.getElementById(id);
+    return element ? element.value.trim() : '';
+}
+
+function normalizeSearchText(value) {
+    return String(value || '').toLowerCase();
+}
+
+function entityMatchesWatch(text) {
+    const haystack = normalizeSearchText(text);
+    return watchlist.some(item => item && haystack.includes(normalizeSearchText(item)));
+}
+
+function registerSearchItem(type, label, entity, keywords = '', details = '', key = `${type}:${label}`) {
+    const item = {
+        type,
+        label,
+        entity,
+        keywords: normalizeSearchText(`${label} ${keywords}`),
+        details: typeof details === 'string' ? details : ''
+    };
+
+    if (searchableByKey.has(key)) {
+        Object.assign(searchableByKey.get(key), item);
+        return;
+    }
+
+    searchableByKey.set(key, item);
+    searchableItems.push(item);
+}
+
+function getItemEntity(item) {
+    return item && (item.entity || item);
+}
+
+function itemPassesFilters(item) {
+    const entity = getItemEntity(item);
+    if (!entity) return false;
+    if (entity.filterVisible === false) return false;
+    if (entity.zoomVisible === false) return false;
+    return true;
 }
 
 function getEntityPosition(entity) {
@@ -128,7 +200,7 @@ function isEntityOnVisibleSide(entity, occluder) {
 function setScopedEntityVisibility(entities, visible, occluder) {
     entities.forEach(item => {
         const entity = item.entity || item;
-        entity.show = visible && isEntityOnVisibleSide(entity, occluder);
+        entity.show = visible && itemPassesFilters(item) && isEntityOnVisibleSide(entity, occluder);
     });
 }
 
@@ -144,10 +216,160 @@ function applyVisibleSideScope() {
     setScopedEntityVisibility(airportEntities, isLayerChecked('toggle-airports'), occluder);
     setScopedEntityVisibility(liveShipEntities, isLayerChecked('toggle-ship-traffic'), occluder);
     setScopedEntityVisibility(planeEntities, isLayerChecked('toggle-planes'), occluder);
+    setScopedEntityVisibility(airportEntities, isLayerChecked('toggle-airports'), occluder);
     setScopedEntityVisibility(militaryEntities, isLayerChecked('toggle-military'), occluder);
 }
 
+function refreshVisibleSideScope() {
+    updateZoomPriority();
+    applyFilters();
+    applyVisibleSideScope();
+    setWeatherVisible(isLayerChecked('toggle-weather'));
+    setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
+    declutterLiveShipLabels();
+    updateWatchlistHighlights();
+}
 
+function scheduleShipLabelRefresh() {
+    window.clearTimeout(shipLabelRefreshTimer);
+    shipLabelRefreshTimer = window.setTimeout(refreshVisibleSideScope, AIS_LABEL_REFRESH_DEBOUNCE_MS);
+}
+
+function createPlaneIcon() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 48;
+    canvas.height = 48;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(24, 24);
+    ctx.fillStyle = '#f6c400';
+    ctx.strokeStyle = '#6d5700';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -21);
+    ctx.lineTo(5, -4);
+    ctx.lineTo(20, 3);
+    ctx.lineTo(20, 8);
+    ctx.lineTo(4, 5);
+    ctx.lineTo(4, 16);
+    ctx.lineTo(10, 20);
+    ctx.lineTo(10, 23);
+    ctx.lineTo(0, 18);
+    ctx.lineTo(-10, 23);
+    ctx.lineTo(-10, 20);
+    ctx.lineTo(-4, 16);
+    ctx.lineTo(-4, 5);
+    ctx.lineTo(-20, 8);
+    ctx.lineTo(-20, 3);
+    ctx.lineTo(-5, -4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    return canvas.toDataURL();
+}
+
+const PLANE_ICON = createPlaneIcon();
+
+function createShipIcon() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 72;
+    canvas.height = 72;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(36, 36);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.fillStyle = '#d8f5ff';
+    ctx.strokeStyle = '#5f3718';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, -25);
+    ctx.lineTo(0, 10);
+    ctx.stroke();
+
+    ctx.fillStyle = '#f7efe0';
+    ctx.beginPath();
+    ctx.moveTo(2, -22);
+    ctx.lineTo(20, 1);
+    ctx.lineTo(2, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff7e8';
+    ctx.beginPath();
+    ctx.moveTo(-2, -18);
+    ctx.lineTo(-18, 4);
+    ctx.lineTo(-2, 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#8b4f24';
+    ctx.strokeStyle = '#4b2a13';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(-25, 10);
+    ctx.quadraticCurveTo(0, 25, 25, 10);
+    ctx.lineTo(16, 20);
+    ctx.quadraticCurveTo(0, 29, -16, 20);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = '#f3d6a0';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-14, 17);
+    ctx.lineTo(14, 17);
+    ctx.stroke();
+
+    return canvas.toDataURL();
+}
+
+const SHIP_ICON = createShipIcon();
+
+function createAirportIcon() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 44;
+    canvas.height = 44;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(22, 22);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.fillStyle = 'rgba(8, 16, 22, 0.78)';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#00ffcc';
+    ctx.beginPath();
+    ctx.moveTo(0, -15);
+    ctx.lineTo(4, -2);
+    ctx.lineTo(15, 3);
+    ctx.lineTo(15, 7);
+    ctx.lineTo(3, 5);
+    ctx.lineTo(3, 12);
+    ctx.lineTo(8, 15);
+    ctx.lineTo(8, 18);
+    ctx.lineTo(0, 14);
+    ctx.lineTo(-8, 18);
+    ctx.lineTo(-8, 15);
+    ctx.lineTo(-3, 12);
+    ctx.lineTo(-3, 5);
+    ctx.lineTo(-15, 7);
+    ctx.lineTo(-15, 3);
+    ctx.lineTo(-4, -2);
+    ctx.closePath();
+    ctx.fill();
+
+    return canvas.toDataURL();
+}
+
+const AIRPORT_ICON = createAirportIcon();
 
 let selectedSatelliteKey = null;
 let isUpdatingFlights = false;
@@ -161,6 +383,7 @@ let aisSubscriptionTimer = null;
 let aisLastSubscriptionAt = 0;
 let aisLastScopeKey = '';
 let aisCacheWriteTimer = null;
+let shipLabelRefreshTimer = null;
 const shipStaticByMmsi = new Map();
 
 function clamp(value, min, max) {
@@ -370,8 +593,10 @@ function addSatelliteSample(sat, time, position, telemetry) {
 
 async function loadTLEData() {
     try {
+        setDataStatus('status-tle', 'warn', 'Henter');
         const res = await fetch(TLE_SOURCE_URL);
         if (!res.ok) {
+            setDataStatus('status-tle', 'error', `Fejl ${res.status}`);
             console.warn('Kunne ikke hente TLE-data:', res.status, res.statusText);
             return;
         }
@@ -385,8 +610,10 @@ async function loadTLEData() {
                 tleCache[name.toUpperCase()] = { line1, line2 };
             }
         }
+        setDataStatus('status-tle', 'ok', `${Object.keys(tleCache).length} TLE`);
     } catch (e) {
-        console.error('Fejl ved indlÃ¦sning af TLE-data:', e);
+        setDataStatus('status-tle', 'error', 'Fejl');
+        console.error('Fejl ved indlæsning af TLE-data:', e);
     }
 }
 
@@ -422,6 +649,344 @@ function formatNumber(value, digits) {
     });
 }
 
+function applyFilters() {
+    const minShipSpeed = Number(getInputValue('filter-ship-speed') || 0);
+    const shipText = normalizeSearchText(getInputValue('filter-ship-type'));
+    const minPlaneAltitude = Number(getInputValue('filter-plane-altitude') || 0);
+    const airportType = getInputValue('filter-airport-type') || 'all';
+
+    liveShipEntities.forEach(ship => {
+        const speedOk = !Number.isFinite(minShipSpeed) || minShipSpeed <= 0 || (hasFiniteNumbers(ship.speed) && Number(ship.speed) >= minShipSpeed);
+        const textHaystack = normalizeSearchText(`${ship.name} ${ship.destination} ${ship.shipType} ${ship.description}`);
+        const textOk = !shipText || textHaystack.includes(shipText);
+        ship.filterVisible = speedOk && textOk;
+    });
+
+    planeEntities.forEach(plane => {
+        plane.filterVisible = !Number.isFinite(minPlaneAltitude) || minPlaneAltitude <= 0 || (hasFiniteNumbers(plane.altitude) && Number(plane.altitude) >= minPlaneAltitude);
+    });
+
+    airportEntities.forEach(entity => {
+        const type = entity.airportType || '';
+        entity.filterVisible = airportType === 'all' ||
+            type === 'large_airport' ||
+            (airportType === 'medium_airport' && type === 'medium_airport');
+    });
+}
+
+function updateZoomPriority() {
+    const cameraHeight = viewer.camera.positionCartographic.height;
+
+    airportEntities.forEach(entity => {
+        entity.zoomVisible = entity.airportType === 'large_airport' || cameraHeight <= AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M;
+        if (entity.label) {
+            entity.label.show = cameraHeight <= AIRPORT_LABEL_NEAR_DISTANCE_M;
+        }
+    });
+
+    shipEntities.forEach(entity => {
+        entity.zoomVisible = cameraHeight <= PORT_MAX_CAMERA_HEIGHT_M;
+    });
+}
+
+function setWeatherVisible(visible) {
+    weatherEntities.forEach(entity => {
+        entity.show = visible;
+    });
+}
+
+function setShipTrailsVisible(visible) {
+    liveShipEntities.forEach(ship => {
+        if (ship.trailEntity) {
+            ship.trailEntity.show = visible && ship.entity.show && ship.history && ship.history.length > 1;
+        }
+    });
+}
+
+function loadWatchlist() {
+    try {
+        const raw = localStorage.getItem(WATCHLIST_KEY);
+        watchlist = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(watchlist)) watchlist = [];
+    } catch (e) {
+        watchlist = [];
+    }
+    renderWatchlist();
+}
+
+function saveWatchlist() {
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(watchlist));
+}
+
+function setDataStatus(id, state, text) {
+    const element = document.getElementById(id);
+    if (!element) return;
+    element.classList.remove('status-ok', 'status-warn', 'status-error');
+    element.classList.add(`status-${state}`);
+    const value = element.children[1];
+    if (value) value.textContent = text;
+}
+
+function getFreshAisShipCount(maxAgeMs = AIS_STALE_MS) {
+    const now = Date.now();
+    let count = 0;
+    liveShipEntities.forEach(ship => {
+        if (now - Number(ship.lastSeen || 0) <= maxAgeMs) {
+            count += 1;
+        }
+    });
+    return count;
+}
+
+function updateAisLiveStatus(fallbackState = 'ok', fallbackText = 'Forbundet') {
+    const count = getFreshAisShipCount();
+    if (count > 0) {
+        setDataStatus('status-ais', 'ok', `${count} skibe`);
+        return;
+    }
+
+    setDataStatus('status-ais', fallbackState, fallbackText);
+}
+
+function findSearchItemForWatch(value) {
+    const needle = normalizeSearchText(value);
+    if (!needle) return null;
+
+    const matches = searchableItems
+        .map(item => {
+            const label = normalizeSearchText(item.label);
+            const keywords = normalizeSearchText(item.keywords);
+            let score = Number.POSITIVE_INFINITY;
+
+            if (label === needle) {
+                score = 0;
+            } else if (keywords.split(/\s+/).includes(needle)) {
+                score = 1;
+            } else if (label.includes(needle)) {
+                score = 2;
+            } else if (keywords.includes(needle)) {
+                score = 3;
+            }
+
+            return { item, score };
+        })
+        .filter(match => Number.isFinite(match.score))
+        .sort((a, b) => a.score - b.score);
+
+    return matches.length ? matches[0].item : null;
+}
+
+function focusWatchlistItem(value) {
+    const item = findSearchItemForWatch(value);
+    if (!item) return;
+    focusSearchItem(item);
+}
+
+function renderWatchlist() {
+    const container = document.getElementById('watchlist-items');
+    if (!container) return;
+    container.innerHTML = '';
+
+    if (watchlist.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'Ingen watch-items endnu.';
+        container.appendChild(empty);
+        return;
+    }
+
+    watchlist.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = 'watchlist-item';
+        row.tabIndex = 0;
+        row.title = 'Klik for at zoome ind';
+        row.addEventListener('click', () => focusWatchlistItem(item));
+        row.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                focusWatchlistItem(item);
+            }
+        });
+
+        const label = document.createElement('span');
+        label.textContent = item;
+
+        const remove = document.createElement('button');
+        remove.className = 'watchlist-remove';
+        remove.type = 'button';
+        remove.textContent = 'x';
+        remove.addEventListener('click', event => {
+            event.stopPropagation();
+            removeWatchlistItem(index);
+        });
+
+        row.appendChild(label);
+        row.appendChild(remove);
+        container.appendChild(row);
+    });
+}
+
+function addWatchlistItem(value) {
+    const item = String(value || '').trim();
+    if (!item) return;
+    if (!watchlist.some(existing => normalizeSearchText(existing) === normalizeSearchText(item))) {
+        watchlist.push(item);
+        saveWatchlist();
+        renderWatchlist();
+        refreshVisibleSideScope();
+        runSearch();
+    }
+}
+
+function removeWatchlistItem(index) {
+    watchlist.splice(index, 1);
+    saveWatchlist();
+    renderWatchlist();
+    refreshVisibleSideScope();
+    runSearch();
+}
+
+function initTabs() {
+    document.querySelectorAll('.tab-button').forEach(button => {
+        button.addEventListener('click', () => {
+            const tabName = button.dataset.tab;
+            document.querySelectorAll('.tab-button').forEach(item => item.classList.toggle('active', item === button));
+            document.querySelectorAll('.tab-panel').forEach(panel => {
+                panel.classList.toggle('active', panel.id === `tab-${tabName}`);
+            });
+        });
+    });
+}
+
+function updateWatchlistHighlights() {
+    searchableItems.forEach(item => {
+        const entity = item.entity;
+        if (!entity || !entity.billboard) return;
+        const matched = entityMatchesWatch(`${item.label} ${item.keywords}`);
+        entity.billboard.color = matched ? Cesium.Color.YELLOW : (entity.baseColor || Cesium.Color.WHITE);
+        if (entity.baseScale) {
+            entity.billboard.scale = matched ? entity.baseScale * 1.35 : entity.baseScale;
+        }
+    });
+
+    liveShipEntities.forEach(ship => {
+        if (!ship.entity || !ship.entity.billboard) return;
+        const matched = entityMatchesWatch(`${ship.name} ${ship.mmsi} ${ship.destination} ${ship.shipType}`);
+        ship.entity.billboard.color = matched ? Cesium.Color.YELLOW : Cesium.Color.WHITE;
+        ship.entity.billboard.scale = matched ? 0.58 : 0.42;
+    });
+}
+
+function getDetailImageHtml(type) {
+    const normalizedType = normalizeSearchText(type);
+    let image = '';
+    let alt = '';
+
+    if (normalizedType === 'fly') {
+        image = PLANE_ICON;
+        alt = 'Fly';
+    } else if (normalizedType === 'skib') {
+        image = SHIP_ICON;
+        alt = 'Skib';
+    }
+
+    if (!image) return '';
+    return `<div class="detail-image"><img src="${image}" alt="${alt}"></div>`;
+}
+
+function showDetailPanel(title, body, watchText = '', type = '') {
+    selectedDetailItem = watchText || title;
+    setText('detail-title', title);
+    const bodyElement = document.getElementById('detail-body');
+    const panel = document.getElementById('detail-panel');
+    if (bodyElement) bodyElement.innerHTML = `${getDetailImageHtml(type)}${body}`;
+    if (panel) panel.style.display = 'block';
+}
+
+function hideDetailPanel() {
+    const panel = document.getElementById('detail-panel');
+    if (panel) panel.style.display = 'none';
+    selectedDetailItem = null;
+}
+
+function initDetailPicking() {
+    viewer.screenSpaceEventHandler.setInputAction(click => {
+        const picked = viewer.scene.pick(click.position);
+        if (!Cesium.defined(picked) || !picked.id) return;
+
+        const entity = picked.id;
+        const item = searchableItems.find(candidate => candidate.entity === entity);
+        if (item) {
+            showDetailPanel(item.label, item.details || describeEntity(entity, item.type), item.label, item.type);
+            return;
+        }
+
+        showDetailPanel(entity.name || 'Detaljer', describeEntity(entity, 'Ingen detaljer.'), entity.name || '');
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+}
+
+function describeEntity(entity, fallback = '') {
+    if (!entity) return fallback;
+    if (typeof entity.description === 'string') return entity.description;
+    if (entity.description && typeof entity.description.getValue === 'function') {
+        return entity.description.getValue(viewer.clock.currentTime) || fallback;
+    }
+    return fallback;
+}
+
+function flyToShipEntity(entity) {
+    const position = getEntityPosition(entity);
+    if (!hasValidCartesian(position)) {
+        viewer.flyTo(entity);
+        return;
+    }
+
+    viewer.trackedEntity = undefined;
+    viewer.camera.flyToBoundingSphere(
+        new Cesium.BoundingSphere(position, 200),
+        {
+            offset: new Cesium.HeadingPitchRange(
+                viewer.camera.heading,
+                Cesium.Math.toRadians(-55),
+                SHIP_SEARCH_FOCUS_HEIGHT_M
+            ),
+            duration: 1.2,
+            complete: refreshVisibleSideScope
+        }
+    );
+}
+
+function focusSearchItem(item) {
+    if (!item || !item.entity) return;
+    if (item.type === 'Skib') {
+        flyToShipEntity(item.entity);
+    } else {
+        viewer.trackedEntity = undefined;
+        viewer.flyTo(item.entity);
+    }
+    showDetailPanel(item.label, item.details || describeEntity(item.entity, item.type), item.label, item.type);
+}
+
+function runSearch() {
+    const query = normalizeSearchText(getInputValue('search-box'));
+    const container = document.getElementById('search-results');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!query) return;
+
+    const matches = searchableItems
+        .filter(item => item.keywords.includes(query))
+        .slice(0, 12);
+
+    matches.forEach(item => {
+        const result = document.createElement('div');
+        result.className = 'search-result';
+        result.textContent = `${item.type}: ${item.label}`;
+        result.addEventListener('click', () => focusSearchItem(item));
+        container.appendChild(result);
+    });
+}
+
 function getPlaneAltitudeColor(altitudeMeters) {
     const altitude = clamp(Number(altitudeMeters), 0, FLIGHT_BLUE_ALTITUDE_M);
 
@@ -436,14 +1001,186 @@ function getPlaneAltitudeColor(altitudeMeters) {
 
 function getPlaneBillboardRotation(headingDegrees) {
     if (!hasFiniteNumbers(headingDegrees)) return 0;
-    return CesiumLib.Math.toRadians(Number(headingDegrees)) - PLANE_ICON_HEADING_OFFSET_RADIANS;
+    return -Cesium.Math.toRadians(Number(headingDegrees));
 }
 
-function getNorthAlignedAxis(lon, lat) {
-    const position = CesiumLib.Cartesian3.fromDegrees(lon, lat, SHIP_MARKER_HEIGHT_METERS);
-    const frame = CesiumLib.Transforms.eastNorthUpToFixedFrame(position);
-    const north = CesiumLib.Matrix4.getColumn(frame, 1, new CesiumLib.Cartesian3());
-    return CesiumLib.Cartesian3.normalize(north, north);
+function getPointAtBearing(lonDegrees, latDegrees, bearingDegrees, distanceMeters) {
+    const angularDistance = distanceMeters / Cesium.Ellipsoid.WGS84.maximumRadius;
+    const bearing = Cesium.Math.toRadians(Number(bearingDegrees));
+    const lat1 = Cesium.Math.toRadians(Number(latDegrees));
+    const lon1 = Cesium.Math.toRadians(Number(lonDegrees));
+    const sinLat1 = Math.sin(lat1);
+    const cosLat1 = Math.cos(lat1);
+    const sinDistance = Math.sin(angularDistance);
+    const cosDistance = Math.cos(angularDistance);
+
+    const lat2 = Math.asin(
+        sinLat1 * cosDistance +
+        cosLat1 * sinDistance * Math.cos(bearing)
+    );
+    const lon2 = lon1 + Math.atan2(
+        Math.sin(bearing) * sinDistance * cosLat1,
+        cosDistance - sinLat1 * Math.sin(lat2)
+    );
+
+    return {
+        lon: Cesium.Math.toDegrees(lon2),
+        lat: Cesium.Math.toDegrees(lat2)
+    };
+}
+
+function getScreenAlignedRotation(position, lon, lat, headingDegrees) {
+    if (!hasValidCartesian(position) || !hasFiniteNumbers(lon, lat, headingDegrees)) {
+        return getPlaneBillboardRotation(headingDegrees);
+    }
+
+    const currentScreen = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, position);
+    const cartographic = Cesium.Cartographic.fromCartesian(position);
+    const nextPoint = getPointAtBearing(lon, lat, headingDegrees, 10000);
+    const nextPosition = Cesium.Cartesian3.fromDegrees(nextPoint.lon, nextPoint.lat, cartographic.height);
+    const nextScreen = Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, nextPosition);
+
+    if (!currentScreen || !nextScreen || !hasFiniteNumbers(currentScreen.x, currentScreen.y, nextScreen.x, nextScreen.y)) {
+        return getPlaneBillboardRotation(headingDegrees);
+    }
+
+    const dx = nextScreen.x - currentScreen.x;
+    const dy = nextScreen.y - currentScreen.y;
+    if (!hasFiniteNumbers(dx, dy) || (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001)) {
+        return getPlaneBillboardRotation(headingDegrees);
+    }
+
+    return -Math.atan2(dx, -dy);
+}
+
+function updatePlaneBillboardRotation(plane, positionOverride = null) {
+    if (!plane || !plane.entity || !plane.entity.billboard || !hasFiniteNumbers(plane.lon, plane.lat, plane.heading)) {
+        return;
+    }
+
+    const position = positionOverride || getEntityPosition(plane.entity);
+    plane.entity.billboard.rotation = getScreenAlignedRotation(position, plane.lon, plane.lat, plane.heading);
+}
+
+function updatePlaneBillboardRotations() {
+    planeEntities.forEach(updatePlaneBillboardRotation);
+}
+
+function getBillboardRotationFromHeading(headingDegrees) {
+    return 0;
+}
+
+function formatShipLabel(name) {
+    const cleanName = String(name || '').replace(/\s+/g, ' ').trim();
+    if (cleanName.length <= SHIP_LABEL_MAX_LENGTH) return cleanName;
+    return `${cleanName.slice(0, SHIP_LABEL_MAX_LENGTH - 3)}...`;
+}
+
+function boxesOverlap(a, b) {
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function makeShipIconBox(screenPosition) {
+    return {
+        left: screenPosition.x - SHIP_ICON_COLLISION_PX,
+        right: screenPosition.x + SHIP_ICON_COLLISION_PX,
+        top: screenPosition.y - SHIP_ICON_COLLISION_PX,
+        bottom: screenPosition.y + SHIP_ICON_COLLISION_PX
+    };
+}
+
+function makeShipLabelBox(screenPosition, text) {
+    const width = Math.max(36, text.length * SHIP_LABEL_CHAR_WIDTH_PX) + SHIP_LABEL_PADDING_PX * 2;
+    const height = SHIP_LABEL_HEIGHT_PX + SHIP_LABEL_PADDING_PX * 2;
+    const centerY = screenPosition.y - 24;
+
+    return {
+        left: screenPosition.x - width / 2,
+        right: screenPosition.x + width / 2,
+        top: centerY - height / 2,
+        bottom: centerY + height / 2
+    };
+}
+
+function isBoxInsideCanvas(box) {
+    const canvas = viewer.scene.canvas;
+    return box.right >= 0 && box.left <= canvas.clientWidth && box.bottom >= 0 && box.top <= canvas.clientHeight;
+}
+
+function getEntityWindowPosition(entity) {
+    const position = getEntityPosition(entity);
+    if (!hasValidCartesian(position)) return null;
+    return Cesium.SceneTransforms.wgs84ToWindowCoordinates(viewer.scene, position);
+}
+
+function declutterLiveShipLabels() {
+    const layerVisible = isLayerChecked('toggle-ship-traffic');
+    const cameraPosition = viewer.camera.positionWC;
+    const iconBoxes = [];
+    const candidates = [];
+
+    liveShipEntities.forEach(ship => {
+        const entity = ship.entity;
+        if (!entity || !entity.label) return;
+
+        entity.label.show = false;
+        if (!layerVisible || !entity.show) return;
+
+        const position = getEntityPosition(entity);
+        if (!hasValidCartesian(position)) return;
+
+        const distance = Cesium.Cartesian3.distance(cameraPosition, position);
+        if (distance > SHIP_LABEL_MAX_DISTANCE_M) return;
+
+        const screenPosition = getEntityWindowPosition(entity);
+        if (!screenPosition) return;
+
+        const iconBox = makeShipIconBox(screenPosition);
+        iconBoxes.push({ box: iconBox, entity });
+
+        const text = formatShipLabel(ship.name || entity.name);
+        const labelBox = makeShipLabelBox(screenPosition, text);
+        if (!isBoxInsideCanvas(labelBox)) return;
+
+        candidates.push({
+            entity,
+            text,
+            box: labelBox,
+            lastSeen: ship.lastSeen || 0
+        });
+    });
+
+    candidates
+        .sort((a, b) => b.lastSeen - a.lastSeen || a.text.localeCompare(b.text))
+        .forEach(candidate => {
+            const overlapsIcon = iconBoxes.some(icon => icon.entity !== candidate.entity && boxesOverlap(candidate.box, icon.box));
+            if (overlapsIcon) return;
+
+            const overlapsLabel = candidates.some(other => other !== candidate && other.accepted && boxesOverlap(candidate.box, other.box));
+            if (overlapsLabel) return;
+
+            candidate.accepted = true;
+            candidate.entity.label.text = candidate.text;
+            candidate.entity.label.show = true;
+        });
+}
+
+function appendShipTrailPoint(ship, position) {
+    if (!ship || !hasValidCartesian(position)) return;
+
+    ship.history = ship.history || [];
+    const previous = ship.history[ship.history.length - 1];
+    if (previous && Cesium.Cartesian3.distance(previous, position) < SHIP_TRAIL_MIN_DISTANCE_M) return;
+
+    ship.history.push(position);
+    if (ship.history.length > SHIP_TRAIL_MAX_POINTS) {
+        ship.history.shift();
+    }
+
+    if (ship.trailEntity) {
+        ship.trailEntity.polyline.positions = ship.history.slice();
+        ship.trailEntity.show = isLayerChecked('toggle-ship-trails') && ship.entity.show && ship.history.length > 1;
+    }
 }
 
 function createLiveShipEntity({ mmsi, name, lon, lat, course, speed, description, lastSeen }) {
@@ -456,22 +1193,41 @@ function createLiveShipEntity({ mmsi, name, lon, lat, course, speed, description
         billboard: {
             image: SHIP_ICON,
             scale: 0.42,
-            rotation: 0,
-            alignedAxis: getNorthAlignedAxis(lon, lat),
-            disableDepthTestDistance: ALWAYS_SHOW_OVER_TERRAIN
+            rotation: getBillboardRotationFromHeading(course),
+            alignedAxis: Cesium.Cartesian3.ZERO,
+            disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE
         },
         label: {
-            text: name,
-            font: '9pt sans-serif',
-            pixelOffset: new CesiumLib.Cartesian2(0, -14),
-            disableDepthTestDistance: ALWAYS_SHOW_OVER_TERRAIN,
-            distanceDisplayCondition: new CesiumLib.DistanceDisplayCondition(0, 800000)
+            text: formatShipLabel(name),
+            show: false,
+            font: 'bold 10pt sans-serif',
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 3,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            pixelOffset: new Cesium.Cartesian2(0, -24),
+            disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE,
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, SHIP_LABEL_MAX_DISTANCE_M)
         },
         description
     });
 
+    const trailEntity = viewer.entities.add({
+        name: `Spor: ${name}`,
+        show: false,
+        polyline: {
+            positions: [position],
+            width: 2,
+            material: Cesium.Color.CYAN.withAlpha(0.58),
+            clampToGround: true
+        }
+    });
+
     liveShipEntities.set(mmsi, {
+        mmsi,
         entity,
+        trailEntity,
+        history: [position],
         lastSeen,
         lat,
         lon,
@@ -503,8 +1259,8 @@ function updateSatelliteInfoPanel(key) {
     const telemetry = sat.telemetry;
     setText('sat-info-altitude', telemetry ? `${formatNumber(telemetry.altitudeKm, 1)} km` : 'Henter...');
     setText('sat-info-speed', telemetry ? `${formatNumber(telemetry.speedKmh, 0)} km/t` : 'Henter...');
-    setText('sat-info-latitude', telemetry ? `${formatNumber(telemetry.latitude, 2)} deg` : 'Henter...');
-    setText('sat-info-longitude', telemetry ? `${formatNumber(telemetry.longitude, 2)} deg` : 'Henter...');
+    setText('sat-info-latitude', telemetry ? `${formatNumber(telemetry.latitude, 2)}°` : 'Henter...');
+    setText('sat-info-longitude', telemetry ? `${formatNumber(telemetry.longitude, 2)}°` : 'Henter...');
     setText('sat-info-orbit', `ca. ${sat.orbitPeriodMinutes} min`);
 
     const factsElement = document.getElementById('sat-info-facts');
@@ -686,7 +1442,14 @@ function upsertAisShip(aisData) {
     const position = CesiumLib.Cartesian3.fromDegrees(lon, lat, SHIP_MARKER_HEIGHT_METERS);
     if (!hasValidCartesian(position)) return;
 
-    const description = buildAisDescription(mmsi, speed, course, staticData);
+    const description = [
+        'Live AIS',
+        `MMSI: ${mmsi}`,
+        `Fart: ${hasFiniteNumbers(speed) ? speed.toFixed(1) : '-'} kn`,
+        `Kurs: ${hasFiniteNumbers(course) ? course.toFixed(0) : '-'}°`,
+        `Destination: ${staticData.destination || '-'}`,
+        `Skibstype: ${staticData.shipType || '-'}`
+    ].join('<br>');
 
     if (liveShipEntities.has(mmsi)) {
         const ship = liveShipEntities.get(mmsi);
@@ -694,17 +1457,22 @@ function upsertAisShip(aisData) {
         ship.entity.show = isLayerChecked('toggle-ship-traffic');
         ship.entity.name = name;
         ship.entity.description = description;
-        ship.entity.label.text = name;
-        ship.entity.billboard.rotation = 0;
-        ship.entity.billboard.alignedAxis = getNorthAlignedAxis(lon, lat);
+        ship.entity.label.text = formatShipLabel(name);
+        ship.entity.billboard.rotation = getBillboardRotationFromHeading(course);
         ship.lastSeen = Date.now();
         ship.lat = lat;
         ship.lon = lon;
         ship.course = course;
         ship.speed = speed;
+        ship.destination = staticData.destination || '';
+        ship.shipType = staticData.shipType || '';
         ship.name = name;
         ship.description = description;
+        appendShipTrailPoint(ship, position);
+        registerSearchItem('Skib', name, ship.entity, `${mmsi} ${staticData.destination || ''} ${staticData.shipType || ''}`, description, `ship:${mmsi}`);
         scheduleAisCacheWrite();
+        scheduleShipLabelRefresh();
+        updateAisLiveStatus();
         return;
     }
 
@@ -718,7 +1486,16 @@ function upsertAisShip(aisData) {
         description,
         lastSeen: Date.now()
     });
+    const created = liveShipEntities.get(mmsi);
+    if (created) {
+        created.speed = speed;
+        created.destination = staticData.destination || '';
+        created.shipType = staticData.shipType || '';
+        registerSearchItem('Skib', name, created.entity, `${mmsi} ${created.destination} ${created.shipType}`, description, `ship:${mmsi}`);
+    }
     scheduleAisCacheWrite();
+    scheduleShipLabelRefresh();
+    updateAisLiveStatus();
 }
 
 function cleanupStaleAisShips() {
@@ -727,12 +1504,15 @@ function cleanupStaleAisShips() {
     liveShipEntities.forEach((ship, mmsi) => {
         if (now - ship.lastSeen <= AIS_STALE_MS) return;
         viewer.entities.remove(ship.entity);
+        if (ship.trailEntity) viewer.entities.remove(ship.trailEntity);
         liveShipEntities.delete(mmsi);
         shipStaticByMmsi.delete(mmsi);
         removedAny = true;
     });
     if (removedAny) {
         scheduleAisCacheWrite();
+        scheduleShipLabelRefresh();
+        updateAisLiveStatus('warn', 'Ingen live');
     }
 }
 
@@ -752,6 +1532,8 @@ function writeAisShipCache() {
                 lon: ship.lon,
                 course: ship.course,
                 speed: ship.speed,
+                destination: ship.destination,
+                shipType: ship.shipType,
                 name: ship.name,
                 description: ship.description,
                 staticData: shipStaticByMmsi.get(mmsi) || null
@@ -790,14 +1572,17 @@ function restoreAisShipCache() {
                 description: ship.description || `Cached AIS<br>MMSI: ${ship.mmsi}`,
                 lastSeen: Number(ship.lastSeen)
             });
-
-            if (ship.staticData) {
-                shipStaticByMmsi.set(ship.mmsi, ship.staticData);
-                refreshAisShipDescription(ship.mmsi);
+            const restored = liveShipEntities.get(ship.mmsi);
+            if (restored) {
+                restored.speed = Number(ship.speed);
+                restored.destination = ship.destination || '';
+                restored.shipType = ship.shipType || '';
             }
         });
+        refreshVisibleSideScope();
+        updateAisLiveStatus('warn', 'Cache');
     } catch (e) {
-        console.warn('Kunne ikke laese AIS-cache:', e);
+        console.warn('Kunne ikke læse AIS-cache:', e);
     }
 }
 
@@ -808,14 +1593,17 @@ async function parseWebSocketJsonMessage(data) {
 
 function connectAIS() {
     if (!AIS_API_KEY) {
+        setDataStatus('status-ais', 'error', 'Mangler key');
         console.warn('AIS API key mangler.');
         return;
     }
 
     window.clearTimeout(aisReconnectTimer);
+    setDataStatus('status-ais', 'warn', 'Forbinder');
     aisSocket = new WebSocket(AIS_STREAM_URL);
 
     aisSocket.addEventListener('open', () => {
+        updateAisLiveStatus('ok', 'Forbundet');
         aisLastScopeKey = '';
         sendAisSubscription(true);
     });
@@ -834,15 +1622,17 @@ function connectAIS() {
             upsertAisShip(aisData);
             cleanupStaleAisShips();
         } catch (e) {
-            console.warn('AIS besked kunne ikke laeses:', e);
+            console.warn('AIS besked kunne ikke læses:', e);
         }
     });
 
     aisSocket.addEventListener('close', () => {
+        updateAisLiveStatus('warn', 'Genopretter');
         aisReconnectTimer = window.setTimeout(connectAIS, AIS_RECONNECT_MS);
     });
 
     aisSocket.addEventListener('error', error => {
+        setDataStatus('status-ais', 'error', 'Fejl');
         console.warn('AISStream fejl:', error);
     });
 }
@@ -851,7 +1641,10 @@ async function updateFlights() {
     if (!isLayerChecked('toggle-planes')) return;
     if (isUpdatingFlights) return;
     const nowMs = Date.now();
-    if (nowMs < flightRateLimitedUntil) return;
+    if (nowMs < flightRateLimitedUntil) {
+        setDataStatus('status-flights', 'warn', 'Rate limit');
+        return;
+    }
 
     const scopeKey = getFlightScopeQueries().join('|');
     const scopeChanged = scopeKey !== lastFlightScopeKey;
@@ -865,11 +1658,13 @@ async function updateFlights() {
     isUpdatingFlights = true;
     lastFlightRequestAt = nowMs;
     lastFlightScopeKey = scopeKey;
+    setDataStatus('status-flights', 'warn', 'Henter');
 
     try {
         const data = await fetchFlightData();
         if (!Array.isArray(data.states)) return;
-        const now = CesiumLib.JulianDate.now();
+        setDataStatus('status-flights', 'ok', `${data.states.length} fly`);
+        const now = Cesium.JulianDate.now();
         const seenFlights = new Set();
 
         data.states.slice(0, FLIGHT_MAX_RESULTS).forEach(flight => {
@@ -897,9 +1692,9 @@ async function updateFlights() {
                 `Callsign: ${callsign}`,
                 `ICAO: ${icao}`,
                 `Registreret land: ${originCountry}`,
-                `Hoejde: ${formatNumber(altitude, 0)} m`,
+                `Højde: ${formatNumber(altitude, 0)} m`,
                 `Hastighed: ${hasFiniteNumbers(velocityMs) ? formatNumber(velocityMs * 3.6, 0) : '-'} km/t`,
-                `Kurs: ${hasFiniteNumbers(heading) ? formatNumber(heading, 0) : '-'} deg`
+                `Kurs: ${hasFiniteNumbers(heading) ? formatNumber(heading, 0) : '-'}°`
             ].join('<br>');
 
             if (planeEntities.has(icao)) {
@@ -913,7 +1708,17 @@ async function updateFlights() {
                 entity.label.text = callsign;
                 entity.billboard.rotation = getPlaneBillboardRotation(heading);
                 entity.billboard.color = altitudeColor;
+                entity.baseColor = altitudeColor;
                 entity.path.show = plane.sampleCount >= 2;
+                plane.altitude = altitude;
+                plane.callsign = callsign;
+                plane.country = originCountry;
+                plane.lon = lon;
+                plane.lat = lat;
+                plane.heading = heading;
+                plane.filterVisible = true;
+                updatePlaneBillboardRotation(plane, position);
+                registerSearchItem('Fly', callsign, entity, `${icao} ${originCountry}`, description, `plane:${icao}`);
                 return;
             }
 
@@ -959,8 +1764,19 @@ async function updateFlights() {
                 entity,
                 positionProperty,
                 sampleCount: 1,
-                lastSeen: Date.now()
+                lastSeen: Date.now(),
+                altitude,
+                callsign,
+                country: originCountry,
+                lon,
+                lat,
+                heading,
+                filterVisible: true
             });
+            entity.baseScale = 0.45;
+            entity.baseColor = altitudeColor;
+            updatePlaneBillboardRotation(planeEntities.get(icao), position);
+            registerSearchItem('Fly', callsign, entity, `${icao} ${originCountry}`, description, `plane:${icao}`);
         });
 
         planeEntities.forEach((plane, icao) => {
@@ -975,9 +1791,13 @@ async function updateFlights() {
         console.warn('Fejl ved hentning af flytrafik:', e);
         if (e && e.rateLimited) {
             flightRateLimitedUntil = Date.now() + FLIGHT_RATE_LIMIT_BACKOFF_MS;
+            setDataStatus('status-flights', 'warn', 'Rate limit');
+        } else {
+            setDataStatus('status-flights', 'error', 'Fejl');
         }
     } finally {
         isUpdatingFlights = false;
+        refreshVisibleSideScope();
     }
 }
 
@@ -1013,6 +1833,7 @@ function initSatellites() {
             }
         });
         satelliteEntities.push(sat.entity);
+        registerSearchItem('Satellit', sat.name, sat.entity, key, sat.facts.join('<br>'), `sat:${key}`);
     }
 }
 
@@ -1098,59 +1919,536 @@ async function updateSatelliteData() {
             console.error("Fejl ved hentning af satellit: " + sat.name, e);
         }
     }
+    refreshVisibleSideScope();
 }
 
-// 6. FUNKTION: JORDSKÃ†LV LAG
-// 7. FUNKTION: MARITIME LAG (SKIBE & MILITAER)
-// 8. FUNKTION: LUFTHAVNE
+// 6. FUNKTION: JORDSKÆLV LAG
+async function initEarthquakes() {
+    try {
+        const res = await fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson');
+        const data = await res.json();
+        data.features.forEach(quake => {
+            const coords = quake.geometry.coordinates;
+            const mag = quake.properties.mag;
+            if (!coords || !hasFiniteNumbers(coords[0], coords[1], mag)) {
+                console.warn('Springer ugyldigt jordskælv over:', quake.properties.place, { coords, mag });
+                return;
+            }
+            const radius = Math.max(Number(mag), 0.1) * 25000;
+            const position = Cesium.Cartesian3.fromDegrees(Number(coords[0]), Number(coords[1]), 0);
+            if (!hasValidCartesian(position)) {
+                console.warn('Springer jordskælv med ugyldig Cesium-position over:', quake.properties.place, { coords, mag });
+                return;
+            }
+            const ent = viewer.entities.add({
+                name: quake.properties.place,
+                position,
+                ellipse: {
+                    semiMinorAxis: radius,
+                    semiMajorAxis: radius,
+                    material: Cesium.Color.ORANGE.withAlpha(0.4),
+                    outline: true, outlineColor: Cesium.Color.WHITE
+                }
+            });
+            ent.description = `Jordskælv<br>Sted: ${quake.properties.place}<br>Magnitude: ${formatNumber(mag, 1)}`;
+            quakeEntities.push(ent);
+            registerSearchItem('Jordskælv', quake.properties.place, ent, `magnitude ${mag}`, ent.description, `quake:${quake.id || quake.properties.time || quake.properties.place}`);
+        });
+        refreshVisibleSideScope();
+    } catch (e) { console.error("Quake fejl", e); }
+}
+
+function initWeatherLayer() {
+    const bands = [
+        { name: 'Jetstream Nordatlanten', west: -75, south: 42, east: 5, north: 62, color: Cesium.Color.CYAN.withAlpha(0.12) },
+        { name: 'Tropisk fugtbælte', west: -180, south: -8, east: 180, north: 10, color: Cesium.Color.LIME.withAlpha(0.08) },
+        { name: 'Indiske Ocean monsunzone', west: 45, south: -15, east: 105, north: 22, color: Cesium.Color.BLUE.withAlpha(0.10) },
+        { name: 'Stillehav stormspor vest', west: 135, south: 28, east: 180, north: 55, color: Cesium.Color.CYAN.withAlpha(0.10) },
+        { name: 'Stillehav stormspor øst', west: -180, south: 28, east: -125, north: 55, color: Cesium.Color.CYAN.withAlpha(0.10) }
+    ];
+
+    bands.forEach(band => {
+        const entity = viewer.entities.add({
+            name: band.name,
+            show: false,
+            rectangle: {
+                coordinates: Cesium.Rectangle.fromDegrees(band.west, band.south, band.east, band.north),
+                material: band.color,
+                outline: true,
+                outlineColor: Cesium.Color.WHITE.withAlpha(0.18)
+            },
+            description: `Vejrzone<br>${band.name}`
+        });
+        weatherEntities.push(entity);
+        registerSearchItem('Vejr', band.name, entity, 'weather wind storm vejr', entity.description, `weather:${band.name}`);
+    });
+}
+
+function parseCsvRows(text) {
+    const rows = [];
+    let row = [];
+    let field = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        const nextChar = text[i + 1];
+
+        if (char === '"') {
+            if (inQuotes && nextChar === '"') {
+                field += '"';
+                i += 1;
+            } else {
+                inQuotes = !inQuotes;
+            }
+            continue;
+        }
+
+        if (char === ',' && !inQuotes) {
+            row.push(field);
+            field = '';
+            continue;
+        }
+
+        if ((char === '\n' || char === '\r') && !inQuotes) {
+            if (char === '\r' && nextChar === '\n') {
+                i += 1;
+            }
+            row.push(field);
+            if (row.some(value => value !== '')) {
+                rows.push(row);
+            }
+            row = [];
+            field = '';
+            continue;
+        }
+
+        field += char;
+    }
+
+    row.push(field);
+    if (row.some(value => value !== '')) {
+        rows.push(row);
+    }
+
+    return rows;
+}
+
+function airportSortScore(airport) {
+    const typeRank = AIRPORT_TYPE_RANK[airport.type] ?? 9;
+    const scheduledRank = airport.scheduled_service === 'yes' ? 0 : 1;
+    const iataRank = airport.iata_code ? 0 : 1;
+    return typeRank * 100 + scheduledRank * 10 + iataRank;
+}
+
+async function initAirports() {
+    try {
+        setDataStatus('status-airports', 'warn', 'Henter');
+        const response = await fetch('/api/airports');
+        if (!response.ok) {
+            setDataStatus('status-airports', 'error', `Fejl ${response.status}`);
+            console.warn('Kunne ikke hente lufthavne:', response.status, response.statusText);
+            return;
+        }
+
+        const csv = await response.text();
+        const rows = parseCsvRows(csv);
+        const headers = rows.shift();
+        if (!headers) return;
+
+        const airports = rows
+            .map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] || ''])))
+            .filter(airport => AIRPORT_TYPE_RANK[airport.type] !== undefined)
+            .filter(airport => airport.type !== 'closed' && hasFiniteNumbers(airport.longitude_deg, airport.latitude_deg))
+            .sort((a, b) => {
+                const scoreDiff = airportSortScore(a) - airportSortScore(b);
+                if (scoreDiff !== 0) return scoreDiff;
+                return a.name.localeCompare(b.name);
+            })
+            .slice(0, AIRPORT_MAX_RESULTS);
+
+        airports.forEach(airport => {
+            const lon = Number(airport.longitude_deg);
+            const lat = Number(airport.latitude_deg);
+            const elevationMeters = hasFiniteNumbers(airport.elevation_ft) ? Number(airport.elevation_ft) * 0.3048 : 0;
+            const iata = airport.iata_code || airport.ident || '-';
+            const municipality = airport.municipality || '-';
+            const country = airport.iso_country || '-';
+            const typeName = airport.type.replace('_', ' ');
+            const position = Cesium.Cartesian3.fromDegrees(lon, lat, Math.max(elevationMeters, 0) + 25);
+
+            if (!hasValidCartesian(position)) return;
+
+            const entity = viewer.entities.add({
+                name: `${airport.name} (${iata})`,
+                position,
+                billboard: {
+                    image: AIRPORT_ICON,
+                    scale: airport.type === 'large_airport' ? 0.55 : 0.42,
+                    disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE
+                },
+                label: {
+                    text: iata,
+                    font: '8pt sans-serif',
+                    fillColor: Cesium.Color.WHITE,
+                    outlineColor: Cesium.Color.BLACK,
+                    outlineWidth: 2,
+                    style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                    pixelOffset: new Cesium.Cartesian2(0, -18),
+                    distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 700000)
+                },
+                description: [
+                    'Lufthavn',
+                    `Navn: ${airport.name}`,
+                    `Kode: ${iata}`,
+                    `Type: ${typeName}`,
+                    `By: ${municipality}`,
+                    `Land: ${country}`,
+                    `Højde: ${formatNumber(elevationMeters, 0)} m`
+                ].join('<br>')
+            });
+
+            entity.airportType = airport.type;
+            entity.baseScale = airport.type === 'large_airport' ? 0.55 : 0.42;
+            entity.filterVisible = true;
+            entity.zoomVisible = true;
+            airportEntities.push(entity);
+            registerSearchItem('Lufthavn', entity.name, entity, `${iata} ${airport.ident} ${municipality} ${country} ${airport.type}`, entity.description, `airport:${airport.ident}`);
+        });
+
+        refreshVisibleSideScope();
+        setDataStatus('status-airports', 'ok', `${airportEntities.length} vist`);
+    } catch (e) {
+        setDataStatus('status-airports', 'error', 'Fejl');
+        console.warn('Fejl ved hentning af lufthavne:', e);
+    }
+}
+
+// 7. FUNKTION: MARITIME LAG (SKIBE & MILITÆR)
+function initMaritimeLayers() {
+    const civilSpots = [
+        { name: "Port of Shanghai", pos: [121.49, 31.23] },
+        { name: "Port of Singapore", pos: [103.75, 1.26] },
+        { name: "Port of Ningbo-Zhoushan", pos: [122.10, 29.87] },
+        { name: "Port of Shenzhen", pos: [114.27, 22.56] },
+        { name: "Port of Guangzhou", pos: [113.45, 22.93] },
+        { name: "Port of Qingdao", pos: [120.32, 36.06] },
+        { name: "Port of Busan", pos: [129.08, 35.10] },
+        { name: "Port of Tianjin", pos: [117.75, 39.00] },
+        { name: "Port of Hong Kong", pos: [114.16, 22.29] },
+        { name: "Port of Rotterdam", pos: [4.40, 51.90] },
+        { name: "Port Klang", pos: [101.39, 3.00] },
+        { name: "Port of Antwerp-Bruges", pos: [4.31, 51.26] },
+        { name: "Port of Kaohsiung", pos: [120.29, 22.61] },
+        { name: "Port of Xiamen", pos: [118.07, 24.45] },
+        { name: "Port of Tanjung Pelepas", pos: [103.55, 1.36] },
+        { name: "Port of Laem Chabang", pos: [100.88, 13.08] },
+        { name: "Port of Los Angeles", pos: [-118.26, 33.74] },
+        { name: "Port of Long Beach", pos: [-118.21, 33.76] },
+        { name: "Port of Hamburg", pos: [9.99, 53.54] },
+        { name: "Port of New York and New Jersey", pos: [-74.04, 40.67] },
+        { name: "Port of Tanjung Priok", pos: [106.89, -6.10] },
+        { name: "Port of Ho Chi Minh City", pos: [106.75, 10.75] },
+        { name: "Port of Colombo", pos: [79.84, 6.95] },
+        { name: "Port of Jebel Ali", pos: [55.03, 25.01] },
+        { name: "Port of Jawaharlal Nehru", pos: [72.95, 18.95] },
+        { name: "Port of Mundra", pos: [69.70, 22.74] },
+        { name: "Port of Felixstowe", pos: [1.31, 51.95] },
+        { name: "Port of Piraeus", pos: [23.63, 37.94] },
+        { name: "Port of Valencia", pos: [-0.32, 39.45] },
+        { name: "Port of Algeciras", pos: [-5.44, 36.13] },
+        { name: "Port of Bremerhaven", pos: [8.58, 53.55] },
+        { name: "Port of Le Havre", pos: [0.12, 49.49] },
+        { name: "Port of Barcelona", pos: [2.16, 41.34] },
+        { name: "Port of Genoa", pos: [8.92, 44.41] },
+        { name: "Port of Gioia Tauro", pos: [15.90, 38.44] },
+        { name: "Port of Marsaxlokk", pos: [14.54, 35.84] },
+        { name: "Port Said", pos: [32.31, 31.27] },
+        { name: "Suez Canal Container Terminal", pos: [32.34, 31.23] },
+        { name: "Port of Tanger Med", pos: [-5.81, 35.89] },
+        { name: "Port of Durban", pos: [31.02, -29.88] },
+        { name: "Port of Mombasa", pos: [39.65, -4.04] },
+        { name: "Port of Lagos", pos: [3.36, 6.44] },
+        { name: "Port of Tema", pos: [0.01, 5.64] },
+        { name: "Port of Abidjan", pos: [-4.02, 5.29] },
+        { name: "Port of Dakar", pos: [-17.43, 14.68] },
+        { name: "Port of Casablanca", pos: [-7.62, 33.61] },
+        { name: "Port of Alexandria", pos: [29.88, 31.20] },
+        { name: "Port of Damietta", pos: [31.77, 31.47] },
+        { name: "Port of King Abdullah", pos: [39.10, 22.38] },
+        { name: "Jeddah Islamic Port", pos: [39.15, 21.45] },
+        { name: "Port of Salalah", pos: [54.01, 16.94] },
+        { name: "Port Sultan Qaboos", pos: [58.57, 23.63] },
+        { name: "Hamad Port", pos: [51.62, 24.80] },
+        { name: "Port of Dammam", pos: [50.21, 26.50] },
+        { name: "Port of Kuwait Shuwaikh", pos: [47.93, 29.36] },
+        { name: "Port of Manama", pos: [50.61, 26.24] },
+        { name: "Port of Umm Qasr", pos: [47.94, 30.04] },
+        { name: "Port of Bandar Abbas", pos: [56.28, 27.14] },
+        { name: "Port of Chabahar", pos: [60.61, 25.30] },
+        { name: "Port of Karachi", pos: [66.98, 24.84] },
+        { name: "Port Qasim", pos: [67.33, 24.78] },
+        { name: "Port of Chittagong", pos: [91.81, 22.31] },
+        { name: "Port of Yangon", pos: [96.16, 16.77] },
+        { name: "Port of Manila", pos: [120.96, 14.59] },
+        { name: "Port of Subic Bay", pos: [120.23, 14.82] },
+        { name: "Port of Batangas", pos: [121.05, 13.75] },
+        { name: "Port of Cebu", pos: [123.90, 10.30] },
+        { name: "Port of Davao", pos: [125.61, 7.09] },
+        { name: "Port of Tokyo", pos: [139.78, 35.61] },
+        { name: "Port of Yokohama", pos: [139.65, 35.45] },
+        { name: "Port of Nagoya", pos: [136.86, 35.08] },
+        { name: "Port of Kobe", pos: [135.20, 34.68] },
+        { name: "Port of Osaka", pos: [135.43, 34.65] },
+        { name: "Port of Kitakyushu", pos: [130.88, 33.93] },
+        { name: "Port of Incheon", pos: [126.59, 37.45] },
+        { name: "Port of Gwangyang", pos: [127.73, 34.90] },
+        { name: "Port of Ulsan", pos: [129.38, 35.50] },
+        { name: "Port of Dalian", pos: [121.66, 38.92] },
+        { name: "Port of Yingkou", pos: [122.23, 40.67] },
+        { name: "Port of Lianyungang", pos: [119.45, 34.75] },
+        { name: "Port of Suzhou", pos: [120.62, 31.34] },
+        { name: "Port of Fuzhou", pos: [119.46, 26.02] },
+        { name: "Port of Haiphong", pos: [106.68, 20.86] },
+        { name: "Port of Cai Mep", pos: [107.03, 10.55] },
+        { name: "Port of Bangkok", pos: [100.56, 13.70] },
+        { name: "Port of Sihanoukville", pos: [103.51, 10.63] },
+        { name: "Port of Sydney", pos: [151.21, -33.86] },
+        { name: "Port Botany", pos: [151.22, -33.97] },
+        { name: "Port of Melbourne", pos: [144.91, -37.84] },
+        { name: "Port of Brisbane", pos: [153.17, -27.38] },
+        { name: "Port of Fremantle", pos: [115.74, -32.05] },
+        { name: "Port of Auckland", pos: [174.78, -36.84] },
+        { name: "Port of Tauranga", pos: [176.18, -37.66] },
+        { name: "Port of Vancouver", pos: [-123.11, 49.29] },
+        { name: "Port of Prince Rupert", pos: [-130.32, 54.31] },
+        { name: "Port of Seattle", pos: [-122.34, 47.60] },
+        { name: "Port of Tacoma", pos: [-122.41, 47.27] },
+        { name: "Port of Oakland", pos: [-122.32, 37.80] },
+        { name: "Port of Savannah", pos: [-81.14, 32.08] },
+        { name: "Port of Houston", pos: [-95.27, 29.73] }
+    ];
+
+    const militarySpots = [
+        { name: "Naval Station Norfolk (USA)", pos: [-76.32, 36.95] },
+        { name: "Naval Base San Diego (USA)", pos: [-117.13, 32.68] },
+        { name: "Joint Base Pearl Harbor-Hickam (USA)", pos: [-157.94, 21.35] },
+        { name: "Naval Base Kitsap (USA)", pos: [-122.71, 47.56] },
+        { name: "Naval Station Mayport (USA)", pos: [-81.39, 30.39] },
+        { name: "Naval Submarine Base Kings Bay (USA)", pos: [-81.56, 30.80] },
+        { name: "Naval Submarine Base New London (USA)", pos: [-72.08, 41.39] },
+        { name: "Naval Station Everett (USA)", pos: [-122.22, 47.99] },
+        { name: "Naval Base Ventura County (USA)", pos: [-119.20, 34.17] },
+        { name: "Naval Station Rota (Spain/USA)", pos: [-6.35, 36.62] },
+        { name: "NSA Souda Bay (Greece/USA)", pos: [24.14, 35.49] },
+        { name: "Naval Support Activity Bahrain", pos: [50.58, 26.20] },
+        { name: "Camp Lemonnier Djibouti", pos: [43.15, 11.55] },
+        { name: "Guantanamo Bay Naval Base", pos: [-75.14, 19.91] },
+        { name: "Portsmouth Naval Base (UK)", pos: [-1.11, 50.81] },
+        { name: "Devonport Naval Base (UK)", pos: [-4.18, 50.39] },
+        { name: "HMNB Clyde Faslane (UK)", pos: [-4.82, 56.07] },
+        { name: "Rosyth Dockyard (UK)", pos: [-3.45, 56.02] },
+        { name: "Gibraltar Naval Base (UK)", pos: [-5.36, 36.14] },
+        { name: "Brest Naval Base (France)", pos: [-4.49, 48.38] },
+        { name: "Toulon Naval Base (France)", pos: [5.92, 43.12] },
+        { name: "Cherbourg Naval Base (France)", pos: [-1.62, 49.64] },
+        { name: "Lorient Naval Base (France)", pos: [-3.36, 47.74] },
+        { name: "Kiel Naval Base (Germany)", pos: [10.15, 54.33] },
+        { name: "Wilhelmshaven Naval Base (Germany)", pos: [8.15, 53.53] },
+        { name: "Eckernforde Naval Base (Germany)", pos: [9.84, 54.48] },
+        { name: "Den Helder Naval Base (Netherlands)", pos: [4.76, 52.96] },
+        { name: "Zeebrugge Naval Base (Belgium)", pos: [3.19, 51.34] },
+        { name: "Karlskrona Naval Base (Sweden)", pos: [15.59, 56.16] },
+        { name: "Muskö Naval Base (Sweden)", pos: [18.12, 59.00] },
+        { name: "Haakonsvern Naval Base (Norway)", pos: [5.22, 60.33] },
+        { name: "Frederikshavn Naval Base (Denmark)", pos: [10.54, 57.44] },
+        { name: "Korsoer Naval Station (Denmark)", pos: [11.14, 55.33] },
+        { name: "Turku/Pansio Naval Base (Finland)", pos: [22.12, 60.44] },
+        { name: "Upinniemi Naval Base (Finland)", pos: [24.34, 60.04] },
+        { name: "Gdynia Naval Base (Poland)", pos: [18.55, 54.53] },
+        { name: "Swietoujscie Naval Base (Poland)", pos: [14.25, 53.91] },
+        { name: "La Spezia Naval Base (Italy)", pos: [9.83, 44.10] },
+        { name: "Taranto Naval Base (Italy)", pos: [17.23, 40.47] },
+        { name: "Augusta Naval Base (Italy)", pos: [15.22, 37.23] },
+        { name: "Cartagena Naval Base (Spain)", pos: [-0.98, 37.60] },
+        { name: "Ferrol Naval Base (Spain)", pos: [-8.24, 43.48] },
+        { name: "Lisbon Naval Base (Portugal)", pos: [-9.12, 38.70] },
+        { name: "Athens Salamis Naval Base (Greece)", pos: [23.49, 37.96] },
+        { name: "Aksaz Naval Base (Turkey)", pos: [28.39, 36.84] },
+        { name: "Golcuk Naval Base (Turkey)", pos: [29.82, 40.72] },
+        { name: "Constanta Naval Base (Romania)", pos: [28.65, 44.17] },
+        { name: "Varna Naval Base (Bulgaria)", pos: [27.91, 43.20] },
+        { name: "Sevastopol Naval Base (Russia)", pos: [33.53, 44.62] },
+        { name: "Novorossiysk Naval Base (Russia)", pos: [37.80, 44.72] },
+        { name: "Baltiysk Naval Base (Russia)", pos: [19.91, 54.64] },
+        { name: "Kronstadt Naval Base (Russia)", pos: [29.77, 59.99] },
+        { name: "Severomorsk Naval Base (Russia)", pos: [33.42, 69.07] },
+        { name: "Polyarny Naval Base (Russia)", pos: [33.45, 69.20] },
+        { name: "Vladivostok Naval Base (Russia)", pos: [131.89, 43.10] },
+        { name: "Vilyuchinsk Naval Base (Russia)", pos: [158.41, 52.91] },
+        { name: "Tartus Naval Facility (Syria/Russia)", pos: [35.87, 34.89] },
+        { name: "Alexandria Naval Base (Egypt)", pos: [29.88, 31.20] },
+        { name: "Mers El Kebir Naval Base (Algeria)", pos: [-0.70, 35.73] },
+        { name: "Casablanca Naval Base (Morocco)", pos: [-7.62, 33.61] },
+        { name: "Simonstown Naval Base (South Africa)", pos: [18.43, -34.19] },
+        { name: "Durban Naval Base (South Africa)", pos: [31.02, -29.88] },
+        { name: "Lagos Naval Base (Nigeria)", pos: [3.36, 6.44] },
+        { name: "Mombasa Naval Base (Kenya)", pos: [39.65, -4.04] },
+        { name: "Jeddah Naval Base (Saudi Arabia)", pos: [39.15, 21.45] },
+        { name: "Jubail Naval Base (Saudi Arabia)", pos: [49.66, 27.00] },
+        { name: "Abu Dhabi Naval Base (UAE)", pos: [54.37, 24.48] },
+        { name: "Jebel Ali Naval Facility (UAE)", pos: [55.03, 25.01] },
+        { name: "Karachi Naval Dockyard (Pakistan)", pos: [66.98, 24.84] },
+        { name: "Mumbai Naval Dockyard (India)", pos: [72.84, 18.93] },
+        { name: "Visakhapatnam Naval Base (India)", pos: [83.29, 17.69] },
+        { name: "Kochi Naval Base (India)", pos: [76.27, 9.97] },
+        { name: "Karwar INS Kadamba (India)", pos: [74.09, 14.82] },
+        { name: "Port Blair Naval Base (India)", pos: [92.75, 11.67] },
+        { name: "Trincomalee Naval Base (Sri Lanka)", pos: [81.23, 8.56] },
+        { name: "Chittagong Naval Base (Bangladesh)", pos: [91.81, 22.31] },
+        { name: "Sattahip Naval Base (Thailand)", pos: [100.91, 12.66] },
+        { name: "Ream Naval Base (Cambodia)", pos: [103.69, 10.51] },
+        { name: "Cam Ranh Bay Naval Base (Vietnam)", pos: [109.20, 11.91] },
+        { name: "Changi Naval Base (Singapore)", pos: [104.03, 1.32] },
+        { name: "Lumut Naval Base (Malaysia)", pos: [100.61, 4.23] },
+        { name: "Tanjung Priok Naval Base (Indonesia)", pos: [106.89, -6.10] },
+        { name: "Surabaya Naval Base (Indonesia)", pos: [112.73, -7.21] },
+        { name: "Subic Bay Naval Base (Philippines)", pos: [120.23, 14.82] },
+        { name: "Sasebo Naval Base (Japan)", pos: [129.72, 33.16] },
+        { name: "Yokosuka Naval Base (Japan)", pos: [139.67, 35.28] },
+        { name: "Kure Naval Base (Japan)", pos: [132.55, 34.24] },
+        { name: "Maizuru Naval Base (Japan)", pos: [135.39, 35.47] },
+        { name: "Jinhae Naval Base (South Korea)", pos: [128.66, 35.14] },
+        { name: "Busan Naval Base (South Korea)", pos: [129.08, 35.10] },
+        { name: "Jeju Naval Base (South Korea)", pos: [126.49, 33.23] },
+        { name: "Qingdao Naval Base (China)", pos: [120.32, 36.06] },
+        { name: "Ningbo-Zhoushan Naval Base (China)", pos: [122.10, 29.87] },
+        { name: "Sanya Yulin Naval Base (China)", pos: [109.50, 18.21] },
+        { name: "Zhanjiang Naval Base (China)", pos: [110.40, 21.20] },
+        { name: "Keelung Naval Base (Taiwan)", pos: [121.75, 25.13] },
+        { name: "Kaohsiung Naval Base (Taiwan)", pos: [120.29, 22.61] },
+        { name: "Fleet Base East Sydney (Australia)", pos: [151.23, -33.85] },
+        { name: "Fleet Base West HMAS Stirling (Australia)", pos: [115.69, -32.24] },
+        { name: "Devonport Naval Base (New Zealand)", pos: [174.81, -36.83] }
+    ];
+
+    civilSpots.forEach(s => {
+        const ent = viewer.entities.add({
+            name: s.name, position: Cesium.Cartesian3.fromDegrees(s.pos[0], s.pos[1]),
+            billboard: {
+                image: 'https://img.icons8.com/color/48/000000/cargo-ship.png',
+                scale: 0.6,
+                disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE
+            }
+        });
+        ent.baseScale = 0.6;
+        ent.filterVisible = true;
+        ent.zoomVisible = true;
+        ent.description = `Civil havn<br>${s.name}`;
+        shipEntities.push(ent);
+        registerSearchItem('Havn', s.name, ent, 'civil port havn', ent.description, `port:${s.name}`);
+    });
+
+    militarySpots.forEach(m => {
+        const ent = viewer.entities.add({
+            name: m.name, position: Cesium.Cartesian3.fromDegrees(m.pos[0], m.pos[1]),
+            billboard: {
+                image: 'https://img.icons8.com/color/48/000000/battleship.png',
+                scale: 0.7,
+                disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE
+            }
+        });
+        ent.baseScale = 0.7;
+        ent.filterVisible = true;
+        ent.zoomVisible = true;
+        ent.description = `Militær flådebase<br>${m.name}`;
+        militaryEntities.push(ent);
+        registerSearchItem('Flådebase', m.name, ent, 'military naval base', ent.description, `naval:${m.name}`);
+    });
+    refreshVisibleSideScope();
+}
 
 // 8. EVENT LISTENERS: TOGGLE LAYERS
 document.getElementById('toggle-sat').addEventListener('change', e => {
-    satelliteEntities.forEach(ent => ent.show = e.target.checked);
+    refreshVisibleSideScope();
 });
 document.getElementById('toggle-quakes').addEventListener('change', e => {
-    quakeEntities.forEach(ent => ent.show = e.target.checked);
+    refreshVisibleSideScope();
 });
 document.getElementById('toggle-ships').addEventListener('change', e => {
-    shipEntities.forEach(ent => ent.show = e.target.checked);
-});
-document.getElementById('toggle-airports').addEventListener('change', e => {
-    airportEntities.forEach(ent => ent.show = e.target.checked);
+    refreshVisibleSideScope();
 });
 document.getElementById('toggle-ship-traffic').addEventListener('change', e => {
-    setMapEntitiesVisible(liveShipEntities, e.target.checked);
+    refreshVisibleSideScope();
     if (e.target.checked) {
         sendAisSubscription(true);
     }
 });
+document.getElementById('toggle-ship-trails').addEventListener('change', () => {
+    setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
+});
 document.getElementById('toggle-planes').addEventListener('change', e => {
-    setMapEntitiesVisible(planeEntities, e.target.checked);
+    refreshVisibleSideScope();
     if (e.target.checked) {
         scheduleFlightUpdate(0);
     }
 });
+document.getElementById('toggle-airports').addEventListener('change', e => {
+    refreshVisibleSideScope();
+});
 document.getElementById('toggle-military').addEventListener('change', e => {
-    militaryEntities.forEach(ent => ent.show = e.target.checked);
+    refreshVisibleSideScope();
+});
+document.getElementById('toggle-weather').addEventListener('change', e => {
+    setWeatherVisible(e.target.checked);
+});
+document.getElementById('toggle-daynight').addEventListener('change', e => {
+    viewer.scene.globe.enableLighting = e.target.checked;
+});
+
+['filter-ship-speed', 'filter-ship-type', 'filter-plane-altitude', 'filter-airport-type'].forEach(id => {
+    const element = document.getElementById(id);
+    if (element) {
+        element.addEventListener('input', refreshVisibleSideScope);
+        element.addEventListener('change', refreshVisibleSideScope);
+    }
+});
+
+document.getElementById('search-box').addEventListener('input', runSearch);
+document.getElementById('add-watchlist-item').addEventListener('click', () => {
+    addWatchlistItem(getInputValue('watchlist-input'));
+    const input = document.getElementById('watchlist-input');
+    if (input) input.value = '';
+});
+document.getElementById('close-detail-panel').addEventListener('click', hideDetailPanel);
+document.getElementById('detail-watch').addEventListener('click', () => {
+    addWatchlistItem(selectedDetailItem);
 });
 
 viewer.camera.moveEnd.addEventListener(() => {
+    refreshVisibleSideScope();
+    updatePlaneBillboardRotations();
     scheduleFlightUpdate();
     scheduleAisSubscription();
 });
 
 // 9. HÃ˜JDEMÃ…LER LOGIK
 viewer.scene.postRender.addEventListener(() => {
-    applyVisibleSideScope();
     const cameraHeight = viewer.camera.positionCartographic.height;
     const heightInKm = (cameraHeight / 1000).toFixed(1);
     document.getElementById('altitude-display').innerText = `HÃ¸jde: ${heightInKm} km`;
 });
 
-// KÃ˜R ALT VED START
+// KØR ALT VED START
+initTabs();
+loadWatchlist();
+viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
+initDetailPicking();
 initSatellites();
-initEarthquakes({ viewer, quakeEntities, hasFiniteNumbers, hasValidCartesian });
-initMaritimeLayers({ viewer, shipEntities, militaryEntities, SHIP_MARKER_HEIGHT_METERS, ALWAYS_SHOW_OVER_TERRAIN, getNorthAlignedAxis });
-initAirports({ viewer, airportEntities, SHIP_MARKER_HEIGHT_METERS, ALWAYS_SHOW_OVER_TERRAIN });
+initEarthquakes();
+initWeatherLayer();
+initMaritimeLayers();
+initAirports();
 restoreAisShipCache();
 connectAIS();
 scheduleFlightUpdate(0);
