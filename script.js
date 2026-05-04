@@ -64,6 +64,7 @@ const ALL_SATELLITE_TRACE_PAST_MINUTES = 45;
 const ALL_SATELLITE_TRACE_FUTURE_MINUTES = 90;
 const ALL_SATELLITE_TRACE_STEP_MINUTES = 3;
 const ALL_SATELLITE_TRACE_WIDTH = 2;
+const ALL_SATELLITE_TRACE_ALL_LIMIT = 180;
 const ALL_SATELLITE_CATEGORY_TOGGLES = {
     starlink: 'toggle-sat-starlink',
     oneweb: 'toggle-sat-oneweb',
@@ -77,6 +78,17 @@ const ALL_SATELLITE_CATEGORY_LABELS = {
     navigation: 'Navigation',
     earth: 'Vejr og jord',
     other: 'Øvrige satellitter'
+};
+const ALL_SATELLITE_TYPE_LABELS = {
+    starlink: 'Starlink',
+    oneweb: 'OneWeb',
+    navigation: 'Navigation',
+    weather: 'Vejr',
+    earthObservation: 'Jordobservation',
+    communications: 'Kommunikation',
+    crewed: 'Stationer/bemandet',
+    science: 'Forskning',
+    other: 'Øvrig'
 };
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
@@ -265,8 +277,10 @@ function refreshVisibleSideScope() {
     applyVisibleSideScope();
     setWeatherVisible(isLayerChecked('toggle-weather'));
     setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
+    updateTrackedSatelliteTraceVisibility();
     declutterLiveShipLabels();
     updateWatchlistHighlights();
+    updateSatelliteControlPanel();
 }
 
 function scheduleShipLabelRefresh() {
@@ -428,6 +442,7 @@ let lastAltitudeDisplayText = '';
 let allSatellitePointCollection = null;
 let allSatelliteRecords = [];
 let allSatelliteTraceEntity = null;
+let allVisibleSatelliteTraceEntities = [];
 let selectedAllSatelliteRecord = null;
 let isLoadingAllSatellites = false;
 let allSatellitesUpdateTimer = null;
@@ -646,7 +661,8 @@ function addSatelliteSample(sat, time, position, telemetry) {
 
     if (sat.entity) {
         sat.entity.show = true;
-        sat.entity.path.show = sat.sampleCount >= 3;
+        sat.entity.satelliteTraceReady = sat.sampleCount >= 3;
+        sat.entity.path.show = isVisibleSatelliteTraceEnabled() && sat.entity.show && sat.entity.satelliteTraceReady;
     }
 
     if (selectedSatelliteKey && satellites[selectedSatelliteKey] === sat) {
@@ -730,6 +746,7 @@ function setAllSatellitesVisible(visible) {
     }
 
     updateAllSatelliteCategoryVisibility();
+    updateSatelliteControlPanel();
 }
 
 function getAllSatelliteCategory(record) {
@@ -765,6 +782,85 @@ function getAllSatelliteCategory(record) {
     return 'other';
 }
 
+function getAllSatelliteType(record) {
+    const name = normalizeSearchText(record.name);
+    if (name.includes('starlink')) return 'starlink';
+    if (name.includes('oneweb')) return 'oneweb';
+    if (
+        name.includes('iss') ||
+        name.includes('tiangong') ||
+        name.includes('css') ||
+        name.includes('crew dragon') ||
+        name.includes('soyuz') ||
+        name.includes('progress') ||
+        name.includes('shenzhou') ||
+        name.includes('tianzhou')
+    ) {
+        return 'crewed';
+    }
+    if (
+        name.includes('gps') ||
+        name.includes('navstar') ||
+        name.includes('galileo') ||
+        name.includes('glonass') ||
+        name.includes('beidou') ||
+        name.includes('qzss') ||
+        name.includes('sbas')
+    ) {
+        return 'navigation';
+    }
+    if (
+        name.includes('noaa') ||
+        name.includes('meteor') ||
+        name.includes('metop') ||
+        name.includes('goes') ||
+        name.includes('himawari') ||
+        name.includes('fengyun') ||
+        name.includes('weather')
+    ) {
+        return 'weather';
+    }
+    if (
+        name.includes('landsat') ||
+        name.includes('sentinel') ||
+        name.includes('terra') ||
+        name.includes('aqua') ||
+        name.includes('suomi') ||
+        name.includes('spot') ||
+        name.includes('pleiades') ||
+        name.includes('worldview') ||
+        name.includes('cartosat') ||
+        name.includes('resourcesat')
+    ) {
+        return 'earthObservation';
+    }
+    if (
+        name.includes('intelsat') ||
+        name.includes('eutelsat') ||
+        name.includes('ses') ||
+        name.includes('viasat') ||
+        name.includes('inmarsat') ||
+        name.includes('iridium') ||
+        name.includes('globalstar') ||
+        name.includes('orbcomm') ||
+        name.includes('thuraya')
+    ) {
+        return 'communications';
+    }
+    if (
+        name.includes('hubble') ||
+        name.includes('chandra') ||
+        name.includes('swift') ||
+        name.includes('nustar') ||
+        name.includes('xmm') ||
+        name.includes('tess') ||
+        name.includes('gaia')
+    ) {
+        return 'science';
+    }
+    return 'other';
+}
+
 function isAllSatelliteCategoryVisible(category) {
     return isLayerChecked('toggle-all-satellites') && isLayerChecked(ALL_SATELLITE_CATEGORY_TOGGLES[category]);
 }
@@ -776,6 +872,79 @@ function updateAllSatelliteCategoryVisibility() {
         }
     });
     refreshAllSatelliteTrace();
+    refreshAllVisibleSatelliteTraces();
+    updateSatelliteControlPanel();
+}
+
+function getVisibleAllSatelliteRecords() {
+    return allSatelliteRecords.filter(record => (
+        record.point &&
+        record.point.show &&
+        record.hasPosition &&
+        isAllSatelliteCategoryVisible(record.category)
+    ));
+}
+
+function getTraceableVisibleSatelliteRecords() {
+    const cameraPosition = viewer.camera.positionWC;
+    return getVisibleAllSatelliteRecords()
+        .map(record => ({
+            record,
+            distance: hasValidCartesian(record.point.position)
+                ? CesiumLib.Cartesian3.distance(cameraPosition, record.point.position)
+                : Number.POSITIVE_INFINITY
+        }))
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, ALL_SATELLITE_TRACE_ALL_LIMIT)
+        .map(item => item.record);
+}
+
+function isSatelliteLayerVisible() {
+    return isLayerChecked('toggle-sat') || isLayerChecked('toggle-all-satellites');
+}
+
+function isVisibleSatelliteTraceEnabled() {
+    return isLayerChecked('toggle-visible-satellite-traces');
+}
+
+function getSatellitePanelTraceCount() {
+    const trackedTraceCount = satelliteEntities.filter(entity => entity.show && entity.path && entity.path.show).length;
+    return trackedTraceCount +
+        allVisibleSatelliteTraceEntities.filter(entity => entity.show).length +
+        (allSatelliteTraceEntity && allSatelliteTraceEntity.show ? 1 : 0);
+}
+
+function updateSatelliteControlPanel() {
+    const panel = document.getElementById('satellite-control-panel');
+    if (panel) {
+        panel.style.display = isSatelliteLayerVisible() ? 'block' : 'none';
+    }
+
+    const visibleRecords = getVisibleAllSatelliteRecords();
+    setText('sat-panel-visible-count', String(visibleRecords.length + satelliteEntities.filter(entity => entity.show).length));
+    setText('sat-panel-trace-count', String(getSatellitePanelTraceCount()));
+
+    const note = document.getElementById('sat-panel-note');
+    if (note) {
+        const visibleAllCount = visibleRecords.length;
+        if (isVisibleSatelliteTraceEnabled() && visibleAllCount > ALL_SATELLITE_TRACE_ALL_LIMIT) {
+            note.textContent = `Viser trace for de ${ALL_SATELLITE_TRACE_ALL_LIMIT} nærmeste satellitter for at holde kortet hurtigt.`;
+        } else if (isSatelliteLayerVisible()) {
+            note.textContent = 'Klik på en satellit for separat infovindue og valgt trace.';
+        } else {
+            note.textContent = '';
+        }
+    }
+}
+
+function updateTrackedSatelliteTraceVisibility() {
+    const showTraces = isVisibleSatelliteTraceEnabled();
+    satelliteEntities.forEach(entity => {
+        if (entity.path) {
+            entity.path.show = showTraces && entity.show && entity.satelliteTraceReady === true;
+        }
+    });
+    updateSatelliteControlPanel();
 }
 
 function formatAllSatelliteDetails(record) {
@@ -795,6 +964,7 @@ function formatAllSatelliteDetails(record) {
     return [
         'Satellit',
         `Kategori: ${ALL_SATELLITE_CATEGORY_LABELS[record.category] || 'Ukendt'}`,
+        `Type: ${ALL_SATELLITE_TYPE_LABELS[record.satelliteType] || 'Ukendt'}`,
         `Navn: ${record.name}`,
         `Højde: ${altitude}`,
         `Breddegrad: ${latitude}`,
@@ -803,11 +973,15 @@ function formatAllSatelliteDetails(record) {
 }
 
 function getAllSatelliteColor(record) {
-    if (record.category === 'starlink') return Cesium.Color.CYAN.withAlpha(0.78);
-    if (record.category === 'oneweb') return Cesium.Color.LIME.withAlpha(0.72);
-    if (record.category === 'navigation') return Cesium.Color.YELLOW.withAlpha(0.78);
-    if (record.category === 'earth') {
-        return Cesium.Color.ORANGE.withAlpha(0.76);
+    if (record.satelliteType === 'starlink') return Cesium.Color.CYAN.withAlpha(0.82);
+    if (record.satelliteType === 'oneweb') return Cesium.Color.LIME.withAlpha(0.78);
+    if (record.satelliteType === 'navigation') return Cesium.Color.YELLOW.withAlpha(0.82);
+    if (record.satelliteType === 'weather') return Cesium.Color.ORANGE.withAlpha(0.82);
+    if (record.satelliteType === 'earthObservation') return Cesium.Color.SPRINGGREEN.withAlpha(0.78);
+    if (record.satelliteType === 'communications') return Cesium.Color.MAGENTA.withAlpha(0.76);
+    if (record.satelliteType === 'crewed') return Cesium.Color.RED.withAlpha(0.86);
+    if (record.satelliteType === 'science') {
+        return Cesium.Color.MEDIUMPURPLE.withAlpha(0.78);
     }
     return Cesium.Color.WHITE.withAlpha(0.68);
 }
@@ -850,6 +1024,7 @@ function clearAllSatelliteTrace() {
     if (allSatelliteTraceEntity) {
         allSatelliteTraceEntity.show = false;
     }
+    updateSatelliteControlPanel();
 }
 
 function showAllSatelliteTrace(record) {
@@ -895,6 +1070,37 @@ function showAllSatelliteTrace(record) {
 function refreshAllSatelliteTrace() {
     if (!selectedAllSatelliteRecord) return;
     showAllSatelliteTrace(selectedAllSatelliteRecord);
+}
+
+function clearAllVisibleSatelliteTraces() {
+    allVisibleSatelliteTraceEntities.forEach(entity => viewer.entities.remove(entity));
+    allVisibleSatelliteTraceEntities = [];
+    updateSatelliteControlPanel();
+}
+
+function refreshAllVisibleSatelliteTraces() {
+    clearAllVisibleSatelliteTraces();
+    updateTrackedSatelliteTraceVisibility();
+    if (!isVisibleSatelliteTraceEnabled() || !isLayerChecked('toggle-all-satellites')) {
+        return;
+    }
+
+    getTraceableVisibleSatelliteRecords().forEach(record => {
+        const positions = buildAllSatelliteTracePositions(record);
+        if (positions.length < 2) return;
+
+        allVisibleSatelliteTraceEntities.push(viewer.entities.add({
+            name: `Satellitspor: ${record.name}`,
+            polyline: {
+                positions,
+                width: 1,
+                material: getAllSatelliteColor(record).withAlpha(0.24)
+            },
+            description: formatAllSatelliteDetails(record)
+        }));
+    });
+
+    updateSatelliteControlPanel();
 }
 
 function updateAllSatellitesLayer(startIndex = 0, date = new Date(), gmst = getSatelliteGmst(date)) {
@@ -952,6 +1158,7 @@ async function loadAllSatellitesLayer() {
                         ...record,
                         satrec: SatelliteLib.twoline2satrec(record.line1, record.line2),
                         category: getAllSatelliteCategory(record),
+                        satelliteType: getAllSatelliteType(record),
                         hasPosition: false,
                         point: null
                     };
@@ -2876,6 +3083,8 @@ function applyLayerSideEffects() {
     setWeatherVisible(isLayerChecked('toggle-weather'));
     setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
     viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
+    refreshAllVisibleSatelliteTraces();
+    updateSatelliteControlPanel();
 
     if (isLayerChecked('toggle-ship-traffic')) {
         connectAIS();
@@ -2913,6 +3122,8 @@ addLayerToggleListener('toggle-sat', event => {
 addLayerToggleListener('toggle-all-satellites', event => {
     Object.values(ALL_SATELLITE_CATEGORY_TOGGLES).forEach(id => setCheckboxState(id, event.target.checked));
     setAllSatellitesVisible(event.target.checked);
+    refreshAllVisibleSatelliteTraces();
+    updateSatelliteControlPanel();
 });
 Object.values(ALL_SATELLITE_CATEGORY_TOGGLES).forEach(id => {
     addLayerToggleListener(id, event => {
@@ -2927,6 +3138,7 @@ Object.values(ALL_SATELLITE_CATEGORY_TOGGLES).forEach(id => {
         } else {
             updateAllSatelliteCategoryVisibility();
         }
+        refreshAllVisibleSatelliteTraces();
     });
 });
 addLayerToggleListener('toggle-quakes', event => {
@@ -2964,6 +3176,16 @@ addLayerToggleListener('toggle-daynight', event => {
 });
 syncLayerGroupStates();
 
+addLayerToggleListener('toggle-visible-satellite-traces', () => {
+    updateTrackedSatelliteTraceVisibility();
+    refreshAllVisibleSatelliteTraces();
+    refreshAllSatelliteTrace();
+    updateSatelliteControlPanel();
+});
+addOptionalEventListener('clear-satellite-trace', 'click', () => {
+    clearAllSatelliteTrace();
+});
+
 ['filter-ship-speed', 'filter-ship-type', 'filter-plane-altitude', 'filter-airport-type'].forEach(id => {
     const element = document.getElementById(id);
     if (element) {
@@ -2986,6 +3208,7 @@ addOptionalEventListener('detail-watch', 'click', () => {
 viewer.camera.moveEnd.addEventListener(() => {
     refreshVisibleSideScope();
     updatePlaneBillboardRotations();
+    refreshAllVisibleSatelliteTraces();
     scheduleFlightUpdate();
     scheduleAisSubscription();
 });

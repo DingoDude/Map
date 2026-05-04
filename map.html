@@ -146,6 +146,30 @@
         #satellite-info .facts { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.18); font-size: 13px; line-height: 1.4; color: #d8eef2; }
         #satellite-info .close-button { position: absolute; top: 8px; right: 8px; width: auto; border: 0; background: transparent; color: white; font-size: 18px; padding: 0 4px; }
 
+        #satellite-control-panel {
+            position: absolute; top: 230px; right: 90px;
+            width: 280px; background: rgba(12, 18, 24, 0.9);
+            color: white; padding: 14px; border-radius: 8px;
+            font-family: sans-serif; z-index: 99;
+            border: 1px solid rgba(0, 255, 204, 0.42);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+            display: none;
+        }
+        #satellite-control-panel h3 { margin: 0 0 10px 0; color: #00ffcc; font-size: 16px; }
+        #satellite-control-panel .sat-panel-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            padding: 7px 0; border-top: 1px solid rgba(255,255,255,0.12);
+            font-size: 13px; color: #d8eef2;
+        }
+        #satellite-control-panel .sat-panel-row:first-of-type { border-top: 0; }
+        #satellite-control-panel .sat-panel-value { color: #ffffff; font-family: monospace; text-align: right; }
+        #satellite-control-panel .sat-panel-note {
+            margin: 8px 0 0; color: #9db4bd; font-size: 12px; line-height: 1.35;
+        }
+        #satellite-control-panel .layer-item {
+            margin: 0 0 8px 0; background: rgba(255,255,255,0.06);
+        }
+
         #detail-panel {
             position: absolute; right: 90px; bottom: 30px; width: 300px;
             background: rgba(12, 18, 24, 0.9); color: #fff; padding: 14px;
@@ -303,6 +327,15 @@
             <dt>OmlÃ¸bstid</dt><dd id="sat-info-orbit">-</dd>
         </dl>
         <div class="facts" id="sat-info-facts"></div>
+    </div>
+
+    <div id="satellite-control-panel">
+        <h3>Satellitkontrol</h3>
+        <label class="layer-item"><span>Trace for viste</span><input type="checkbox" id="toggle-visible-satellite-traces"></label>
+        <div class="sat-panel-row"><span>Synlige satellitter</span><span class="sat-panel-value" id="sat-panel-visible-count">0</span></div>
+        <div class="sat-panel-row"><span>Trace-ruter</span><span class="sat-panel-value" id="sat-panel-trace-count">0</span></div>
+        <button id="clear-satellite-trace" type="button">Ryd valgt trace</button>
+        <p class="sat-panel-note" id="sat-panel-note"></p>
     </div>
 
     <div id="detail-panel">
