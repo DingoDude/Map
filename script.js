@@ -1,8 +1,7 @@
-// 1. DIN CESIUM ION TOKEN
 const CesiumLib = window.Cesium;
 const SatelliteLib = window.satellite;
-Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI5NTBiY2Q0NS02ZDc4LTRkOWEtYmIzYS0yZDdmM2MzMGU3NmIiLCJpZCI6NDE5MDQwLCJpYXQiOjE3NzY3NzIzODR9.pGxmdND27nVBk6Wi2I4t_dUYq1ytFnbmYnwLH53Vnro';
-const AIS_API_KEY = '1d99e78a9c489a3a0310b6c016af3bf4c2319e5c';
+Cesium.Ion.defaultAccessToken = window.CESIUM_ION_TOKEN || '';
+const AIS_API_KEY = window.AIS_API_KEY || '';
 const AIS_STREAM_URL = 'wss://stream.aisstream.io/v0/stream';
 const AIS_RECONNECT_MS = 10000;
 const AIS_SUBSCRIPTION_DEBOUNCE_MS = 600;
@@ -93,15 +92,26 @@ const ALL_SATELLITE_TYPE_LABELS = {
 };
 
 // 2. INITIALISÉR VIEWERS (Rettet version uden createWorldTerrain-fejl)
+function createBaseLayer() {
+    return Cesium.ImageryLayer.fromProviderAsync(
+        Cesium.ArcGisMapServerImageryProvider.fromUrl(
+            'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
+        )
+    );
+}
+
 const viewer = new Cesium.Viewer('cesiumContainer', {
-    terrain: Cesium.Terrain.fromWorldTerrain(), // Den korrekte måde i nyere versioner
-    baseLayerPicker: true,
+    baseLayer: createBaseLayer(),
+    terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+    baseLayerPicker: false,
     geocoder: false,
     homeButton: false,
+    infoBox: false,
+    selectionIndicator: false,
     shouldAnimate: true
 });
 
-viewer.scene.globe.depthTestAgainstTerrain = true;
+viewer.scene.globe.depthTestAgainstTerrain = false;
 
 viewer.camera.setView({
     destination: PERSIAN_GULF_VIEW
@@ -472,6 +482,12 @@ function addOptionalEventListener(id, eventName, handler) {
         element.addEventListener(eventName, handler);
     }
     return element;
+}
+
+function clearElement(element) {
+    if (element) {
+        element.replaceChildren();
+    }
 }
 
 function snapDown(value, step) {
@@ -1548,7 +1564,7 @@ function focusWatchlistItem(value) {
 function renderWatchlist() {
     const container = document.getElementById('watchlist-items');
     if (!container) return;
-    container.innerHTML = '';
+    clearElement(container);
 
     if (watchlist.length === 0) {
         const empty = document.createElement('div');
@@ -1640,7 +1656,7 @@ function updateWatchlistHighlights() {
     });
 }
 
-function getDetailImageHtml(type) {
+function createDetailImageElement(type) {
     const normalizedType = normalizeSearchText(type);
     let image = '';
     let alt = '';
@@ -1653,8 +1669,31 @@ function getDetailImageHtml(type) {
         alt = 'Skib';
     }
 
-    if (!image) return '';
-    return `<div class="detail-image"><img src="${image}" alt="${alt}"></div>`;
+    if (!image) return null;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'detail-image';
+    const img = document.createElement('img');
+    img.src = image;
+    img.alt = alt;
+    wrapper.appendChild(img);
+    return wrapper;
+}
+
+function renderDetailBody(element, body, type) {
+    clearElement(element);
+    const image = createDetailImageElement(type);
+    if (image) {
+        element.appendChild(image);
+    }
+
+    String(body || '').split(/<br\s*\/?>/i).forEach(line => {
+        const text = line.replace(/<[^>]*>/g, '').trim();
+        if (!text) return;
+        const row = document.createElement('div');
+        row.textContent = text;
+        element.appendChild(row);
+    });
 }
 
 function showDetailPanel(title, body, watchText = '', type = '') {
@@ -1662,7 +1701,7 @@ function showDetailPanel(title, body, watchText = '', type = '') {
     setText('detail-title', title);
     const bodyElement = document.getElementById('detail-body');
     const panel = document.getElementById('detail-panel');
-    if (bodyElement) bodyElement.innerHTML = `${getDetailImageHtml(type)}${body}`;
+    if (bodyElement) renderDetailBody(bodyElement, body, type);
     if (panel) panel.style.display = 'block';
 }
 
@@ -1755,7 +1794,7 @@ function runSearch() {
     const query = normalizeSearchText(getInputValue('search-box'));
     const container = document.getElementById('search-results');
     if (!container) return;
-    container.innerHTML = '';
+    clearElement(container);
     if (!query) return;
 
     const matches = searchableItems
@@ -2082,7 +2121,12 @@ function updateSatelliteInfoPanel(key) {
 
     const factsElement = document.getElementById('sat-info-facts');
     if (factsElement) {
-        factsElement.innerHTML = sat.facts.map(fact => `<div>${fact}</div>`).join('');
+        clearElement(factsElement);
+        sat.facts.forEach(fact => {
+            const row = document.createElement('div');
+            row.textContent = fact;
+            factsElement.appendChild(row);
+        });
     }
 }
 
@@ -2800,6 +2844,7 @@ async function initEarthquakes() {
                 ellipse: {
                     semiMinorAxis: radius,
                     semiMajorAxis: radius,
+                    height: 0,
                     material: Cesium.Color.ORANGE.withAlpha(0.4),
                     outline: true, outlineColor: Cesium.Color.WHITE
                 }
@@ -2827,6 +2872,7 @@ function initWeatherLayer() {
             show: false,
             rectangle: {
                 coordinates: Cesium.Rectangle.fromDegrees(band.west, band.south, band.east, band.north),
+                height: 0,
                 material: band.color,
                 outline: true,
                 outlineColor: Cesium.Color.WHITE.withAlpha(0.18)
@@ -3381,6 +3427,8 @@ addOptionalEventListener('clear-satellite-trace', 'click', () => {
     clearTrackedSatelliteOrbit();
 });
 addOptionalEventListener('close-satellite-info', 'click', hideSatelliteInfoPanel);
+addOptionalEventListener('find-iss', 'click', () => flyToSat('iss'));
+addOptionalEventListener('find-tiangong', 'click', () => flyToSat('tiangong'));
 
 ['filter-ship-speed', 'filter-ship-type', 'filter-plane-altitude', 'filter-airport-type'].forEach(id => {
     const element = document.getElementById(id);

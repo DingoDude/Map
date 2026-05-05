@@ -132,7 +132,7 @@ function initMaritimeLayers({ viewer, shipEntities, militaryEntities, SHIP_MARKE
         { name: "Den Helder Naval Base (Netherlands)", pos: [4.76, 52.96] },
         { name: "Zeebrugge Naval Base (Belgium)", pos: [3.19, 51.34] },
         { name: "Karlskrona Naval Base (Sweden)", pos: [15.59, 56.16] },
-        { name: "MuskÃ¶ Naval Base (Sweden)", pos: [18.12, 59.00] },
+        { name: "Muskö Naval Base (Sweden)", pos: [18.12, 59.00] },
         { name: "Haakonsvern Naval Base (Norway)", pos: [5.22, 60.33] },
         { name: "Frederikshavn Naval Base (Denmark)", pos: [10.54, 57.44] },
         { name: "Korsoer Naval Station (Denmark)", pos: [11.14, 55.33] },

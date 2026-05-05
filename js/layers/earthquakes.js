@@ -21,6 +21,7 @@ async function initEarthquakes({ viewer, quakeEntities, hasFiniteNumbers, hasVal
                 ellipse: {
                     semiMinorAxis: radius,
                     semiMajorAxis: radius,
+                    height: 0,
                     material: window.Cesium.Color.ORANGE.withAlpha(0.4),
                     outline: true, outlineColor: window.Cesium.Color.WHITE
                 }

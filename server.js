@@ -29,6 +29,26 @@ const tleCache = new Map();
 let airportCache = null;
 let openSkyRateLimitedUntil = 0;
 
+function loadDotEnv() {
+    const envPath = path.join(ROOT, '.env');
+    try {
+        const body = fs.readFileSync(envPath, 'utf8');
+        body.split(/\r?\n/).forEach(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return;
+            const separator = trimmed.indexOf('=');
+            if (separator <= 0) return;
+            const key = trimmed.slice(0, separator).trim();
+            const value = trimmed.slice(separator + 1).trim().replace(/^['"]|['"]$/g, '');
+            if (!process.env[key]) process.env[key] = value;
+        });
+    } catch (error) {
+        return;
+    }
+}
+
+loadDotEnv();
+
 const contentTypes = {
     '.html': 'text/html; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
@@ -47,6 +67,19 @@ function send(response, statusCode, body, headers = {}) {
         ...headers
     });
     response.end(body);
+}
+
+function sendRuntimeConfig(response) {
+    const config = {
+        CESIUM_ION_TOKEN: process.env.CESIUM_ION_TOKEN || '',
+        AIS_API_KEY: process.env.AIS_API_KEY || ''
+    };
+    const body = Object.entries(config)
+        .map(([key, value]) => `window.${key} = ${JSON.stringify(value)};`)
+        .join('\n');
+    send(response, 200, `${body}\n`, {
+        'Content-Type': 'text/javascript; charset=utf-8'
+    });
 }
 
 function getTleCachePath(sourceName) {
@@ -362,7 +395,23 @@ const server = http.createServer((request, response) => {
         return;
     }
 
+    if (request.url.startsWith('/api/config.js')) {
+        sendRuntimeConfig(response);
+        return;
+    }
+
     serveStatic(request, response);
+});
+
+server.on('error', error => {
+    if (error.code === 'EADDRINUSE') {
+        console.error(`Port ${PORT} is already in use.`);
+        console.error(`The map server may already be running at http://127.0.0.1:${PORT}/map.html`);
+        console.error('Close the other server window, or open the URL above in your browser.');
+        process.exit(1);
+    }
+
+    throw error;
 });
 
 server.listen(PORT, () => {

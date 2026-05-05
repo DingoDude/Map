@@ -1,49 +1,196 @@
-/* Grundlæggende setup */
-#cesiumContainer { 
-    position: absolute; top: 0; left: 0; 
-    height: 100vh; width: 100%; 
-    margin: 0; overflow: hidden; 
-}
+﻿html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #061014; }
+        #cesiumContainer { position: absolute; inset: 0; height: 100vh; width: 100%; margin: 0; overflow: hidden; z-index: 0; }
+        
+        /* Kontrolpanel stil */
+        #ui-panel {
+            position: absolute; top: 12px; left: 12px;
+            width: min(300px, calc(100vw - 24px));
+            max-height: calc(100vh - 24px); overflow-y: auto;
+            background: rgba(10, 17, 22, 0.88);
+            color: white; padding: 16px; border-radius: 8px;
+            font-family: Arial, sans-serif; z-index: 100;
+            border: 1px solid rgba(0, 255, 204, 0.28);
+            box-shadow: 0 12px 34px rgba(0, 0, 0, 0.42);
+            backdrop-filter: blur(8px);
+        }
+        #ui-panel h3 { margin: 0; font-size: 20px; color: #00ffcc; letter-spacing: 0; }
+        #ui-panel .panel-subtitle { margin: 3px 0 14px; color: #b8c8cd; font-size: 12px; }
+        #ui-panel .control-section { border-top: 1px solid rgba(255, 255, 255, 0.16); padding-top: 12px; margin-top: 12px; }
+        #ui-panel .section-title { margin: 0 0 8px; color: #00ffcc; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+        #ui-panel .layer-group + .layer-group { margin-top: 12px; }
+        #ui-panel .group-title {
+            margin: 0 0 6px; color: #9fb5bb; font-size: 11px; font-weight: 700;
+            text-transform: uppercase;
+        }
+        #ui-panel .action-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        #ui-panel button {
+            width: 100%; min-height: 34px; border: 1px solid rgba(0, 255, 204, 0.48);
+            border-radius: 6px; background: rgba(255, 255, 255, 0.08);
+            color: white; font-size: 13px; cursor: pointer;
+        }
+        #ui-panel button:hover { background: #00ffcc; color: #061014; }
+        #ui-panel .layer-list { display: grid; gap: 6px; }
+        .layer-item {
+            min-height: 34px; padding: 6px 8px; cursor: pointer; display: flex;
+            align-items: center; justify-content: space-between; gap: 12px;
+            border-radius: 6px; color: #f2f6f7; font-size: 14px;
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .layer-item.layer-parent {
+            min-height: 32px; margin-top: 6px; color: #9fb5bb; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; background: rgba(0, 255, 204, 0.12);
+            border-left: 3px solid #00ffcc;
+        }
+        .layer-item.layer-child {
+            margin-left: 18px; padding-left: 10px; position: relative;
+        }
+        .layer-item.layer-grandchild {
+            min-height: 30px; margin-left: 36px; padding-left: 10px; font-size: 13px; position: relative;
+            color: #d8eef2;
+        }
+        .layer-item.layer-child::before {
+            content: ""; position: absolute; left: -10px; top: 50%;
+            width: 10px; height: 1px; background: rgba(159, 181, 187, 0.55);
+        }
+        .layer-item.layer-grandchild::before {
+            content: ""; position: absolute; left: -10px; top: 50%;
+            width: 10px; height: 1px; background: rgba(159, 181, 187, 0.38);
+        }
+        .layer-item:hover { background: rgba(255, 255, 255, 0.1); }
+        .layer-item input {
+            appearance: none; width: 36px; height: 20px; margin: 0; flex: 0 0 auto;
+            border-radius: 999px; background: rgba(255, 255, 255, 0.28);
+            border: 1px solid rgba(255, 255, 255, 0.38); position: relative;
+        }
+        .layer-item input::after {
+            content: ""; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px;
+            border-radius: 50%; background: white; transition: transform 0.16s ease;
+        }
+        .layer-item input:checked { background: #2aa8b5; border-color: #5eeaf2; }
+        .layer-item input:checked::after { transform: translateX(16px); }
+        .layer-item input:indeterminate { background: #7f8d63; border-color: #cdd99d; }
+        .layer-item input:indeterminate::after { transform: translateX(8px); }
+        .tab-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 10px 0 12px; }
+        .tab-button {
+            width: auto; margin: 0; padding: 6px 4px; border-radius: 4px;
+            border: 1px solid #4b6870; background: rgba(0,0,0,0.28); color: #cfe8ec;
+        }
+        .tab-button.active { background: #00ffcc; color: #061114; border-color: #00ffcc; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+        #tab-filters.active { display: grid; gap: 7px; }
+        #tab-filters label {
+            display: block; margin: 0; color: #d8eef2; font-size: 13px; font-weight: 700;
+            line-height: 1.25;
+        }
+        #tab-filters input,
+        #tab-filters select,
+        #tab-search input {
+            display: block; width: 100%; min-width: 0; box-sizing: border-box;
+            background: rgba(0,0,0,0.42); color: #fff;
+            border: 1px solid #4b6870; border-radius: 4px; padding: 6px 7px;
+            font: inherit;
+        }
+        #tab-filters input,
+        #tab-filters select { margin: -3px 0 5px; }
+        .control-group { margin-top: 12px; border-top: 1px solid rgba(255,255,255,0.22); padding-top: 10px; }
+        .control-group label { display: block; margin: 7px 0 4px; font-size: 12px; color: #b7d5dc; }
+        .control-group input, .control-group select {
+            display: block;
+            width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.42);
+            color: #fff; border: 1px solid #4b6870; border-radius: 4px; padding: 5px;
+            font: inherit;
+        }
+        #search-results { max-height: 120px; overflow-y: auto; margin-top: 6px; font-size: 12px; }
+        .search-result { padding: 5px; border-bottom: 1px solid rgba(255,255,255,0.12); cursor: pointer; }
+        .search-result:hover { background: rgba(0,255,204,0.18); }
+        .status-list, .watchlist-list { display: grid; gap: 6px; font-size: 12px; }
+        .status-item, .watchlist-item {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 6px; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px;
+            background: rgba(0,0,0,0.22);
+        }
+        .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #7c8b91; display: inline-block; margin-right: 6px; }
+        .status-ok .status-dot { background: #00ff88; }
+        .status-warn .status-dot { background: #f6c400; }
+        .status-error .status-dot { background: #ff4d4d; }
+        .watchlist-item { cursor: pointer; }
+        .watchlist-item:hover { background: rgba(0,255,204,0.14); }
+        .watchlist-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .watchlist-remove { width: auto; margin: 0; padding: 2px 7px; }
+        .empty-state { color: #9db4bd; font-size: 12px; margin: 6px 0; }
 
-/* Kontrolpanel stil */
-#ui-panel {
-    position: absolute; top: 10px; left: 10px;
-    background: rgba(30, 30, 30, 0.9); 
-    color: white; padding: 15px; 
-    border-radius: 8px; font-family: sans-serif; 
-    z-index: 100; border: 1px solid #00ffcc;
-    width: 200px;
-}
+        #satellite-info {
+            position: absolute; top: 10px; right: 90px;
+            width: 280px; background: rgba(12, 18, 24, 0.88);
+            color: white; padding: 14px; border-radius: 8px;
+            font-family: sans-serif; z-index: 100;
+            border: 1px solid rgba(0, 255, 204, 0.55);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+            display: none;
+        }
+        #satellite-info h3 { margin: 0 0 10px 0; color: #00ffcc; font-size: 16px; }
+        #satellite-info dl { margin: 0; display: grid; grid-template-columns: 95px 1fr; gap: 6px 10px; }
+        #satellite-info dt { color: #9db4bd; font-size: 12px; }
+        #satellite-info dd { margin: 0; font-family: monospace; color: #ffffff; }
+        #satellite-info .facts { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.18); font-size: 13px; line-height: 1.4; color: #d8eef2; }
+        #satellite-info .close-button { position: absolute; top: 8px; right: 8px; width: auto; border: 0; background: transparent; color: white; font-size: 18px; padding: 0 4px; }
 
-#ui-panel h3 { 
-    margin: 10px 0 5px 0; font-size: 14px; 
-    color: #00ffcc; border-bottom: 1px solid #444; 
-}
+        #satellite-control-panel {
+            position: absolute; top: 230px; right: 90px;
+            width: 280px; background: rgba(12, 18, 24, 0.9);
+            color: white; padding: 14px; border-radius: 8px;
+            font-family: sans-serif; z-index: 99;
+            border: 1px solid rgba(0, 255, 204, 0.42);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+            display: none;
+        }
+        #satellite-control-panel h3 { margin: 0 0 10px 0; color: #00ffcc; font-size: 16px; }
+        #satellite-control-panel .sat-panel-row {
+            display: flex; align-items: center; justify-content: space-between; gap: 12px;
+            padding: 7px 0; border-top: 1px solid rgba(255,255,255,0.12);
+            font-size: 13px; color: #d8eef2;
+        }
+        #satellite-control-panel .sat-panel-row:first-of-type { border-top: 0; }
+        #satellite-control-panel .sat-panel-value { color: #ffffff; font-family: monospace; text-align: right; }
+        #satellite-control-panel .sat-panel-note {
+            margin: 8px 0 0; color: #9db4bd; font-size: 12px; line-height: 1.35;
+        }
+        #satellite-control-panel .layer-item {
+            margin: 0 0 8px 0; background: rgba(255,255,255,0.06);
+        }
 
-.layer-item { 
-    margin-bottom: 6px; cursor: pointer; 
-    display: block; font-size: 13px; 
-}
+        #detail-panel {
+            position: absolute; right: 90px; bottom: 30px; width: 300px;
+            background: rgba(12, 18, 24, 0.9); color: #fff; padding: 14px;
+            border-radius: 8px; font-family: sans-serif; z-index: 100;
+            border: 1px solid rgba(0, 255, 204, 0.45); display: none;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+        }
+        #detail-panel h3 { margin: 0 22px 8px 0; color: #00ffcc; font-size: 16px; }
+        #detail-panel .detail-body { font-size: 13px; line-height: 1.45; color: #d8eef2; }
+        #detail-panel .detail-image {
+            width: 100%; height: 92px; margin: 0 0 10px; display: grid; place-items: center;
+            border: 1px solid rgba(255,255,255,0.14); border-radius: 6px;
+            background: rgba(0,0,0,0.24);
+        }
+        #detail-panel .detail-image img { width: 64px; height: 64px; object-fit: contain; }
+        #detail-panel .close-button { position: absolute; top: 8px; right: 8px; width: auto; border: 0; background: transparent; color: white; font-size: 18px; padding: 0 4px; }
+        #detail-watch { margin-top: 10px; }
 
-/* Knapper (Dem du allerede havde startet på) */
-button { 
-    background: #444; color: white; 
-    border: 1px solid #00ffcc; padding: 5px; 
-    cursor: pointer; margin-bottom: 5px; 
-    width: 100%; font-size: 12px; 
-}
-
-button:hover { 
-    background: #00ffcc; color: black; 
-}
-
-/* Højdemåler i bunden */
-#altitude-display {
-    position: absolute; bottom: 30px; left: 50%; 
-    transform: translateX(-50%);
-    background: rgba(0, 0, 0, 0.7); 
-    color: #00ffcc; padding: 5px 20px;
-    border-radius: 20px; font-family: monospace; 
-    font-size: 16px; z-index: 100;
-    pointer-events: none;
-}
+        /* Højdemåler stil */
+        #altitude-display {
+            position: absolute; bottom: 30px; left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.6);
+            color: #00ffcc; padding: 5px 15px;
+            border-radius: 20px; font-family: monospace;
+            font-size: 18px; pointer-events: none; z-index: 100;
+        }
+        #app-error {
+            position: absolute; left: 50%; top: 20px; transform: translateX(-50%);
+            max-width: min(720px, calc(100vw - 32px)); padding: 12px 14px;
+            background: rgba(120, 18, 18, 0.94); color: white; border-radius: 8px;
+            font-family: monospace; font-size: 13px; z-index: 200; display: none;
+            white-space: pre-wrap;
+        }
