@@ -51,10 +51,21 @@ const SHIP_TRAIL_MAX_REASONABLE_SPEED_KN = 80;
 const SHIP_SEARCH_FOCUS_HEIGHT_M = 35000;
 const UI_INPUT_DEBOUNCE_MS = 180;
 const ALTITUDE_DISPLAY_UPDATE_MS = 250;
+const WIND_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
+const WIND_CAMERA_DEBOUNCE_MS = 1800;
+const WIND_GRID_COLUMNS = 7;
+const WIND_GRID_ROWS = 5;
+const WIND_MAX_SCOPE_DEGREES = 32;
+const WIND_ARROW_BASE_LENGTH_M = 45000;
+const WIND_ARROW_SPEED_LENGTH_M = 6000;
+const WIND_MAX_ARROW_LENGTH_M = 170000;
+const WIND_SAMPLE_HEIGHT_M = 1400;
 const WATCHLIST_KEY = 'space-control-watchlist-v1';
 const AIRPORT_LABEL_NEAR_DISTANCE_M = 900000;
 const AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M = 3500000;
 const PORT_MAX_CAMERA_HEIGHT_M = 5200000;
+const LIVE_CAMERA_MAX_CAMERA_HEIGHT_M = 9000000;
+const EXTRA_LIVE_CAMERA_LIMIT = 200;
 const ALL_SATELLITES_TLE_URL = '/api/tle/active';
 const ALL_SATELLITES_UPDATE_INTERVAL_MS = 30000;
 const ALL_SATELLITES_BATCH_SIZE = 250;
@@ -124,6 +135,7 @@ const shipEntities = [];
 const airportEntities = [];
 const militaryEntities = [];
 const weatherEntities = [];
+const liveCameraEntities = [];
 const liveShipEntities = new Map();
 const planeEntities = new Map();
 const searchableItems = [];
@@ -281,6 +293,7 @@ function applyVisibleSideScope() {
     setScopedEntityVisibility(liveShipEntities, isLayerChecked('toggle-ship-traffic'), occluder);
     setScopedEntityVisibility(planeEntities, isLayerChecked('toggle-planes'), occluder);
     setScopedEntityVisibility(militaryEntities, isLayerChecked('toggle-military'), occluder);
+    setScopedEntityVisibility(liveCameraEntities, isLayerChecked('toggle-live-cameras'), occluder);
 }
 
 function refreshVisibleSideScope() {
@@ -288,7 +301,7 @@ function refreshVisibleSideScope() {
     applyFilters();
     applyVisibleSideScope();
     setWeatherVisible(isLayerChecked('toggle-weather'));
-    setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
+    setShipTrailsVisible(true);
     updateTrackedSatelliteTraceVisibility();
     declutterLiveShipLabels();
     updateWatchlistHighlights();
@@ -436,6 +449,458 @@ function createAirportIcon() {
 
 const AIRPORT_ICON = createAirportIcon();
 
+function createCameraIcon() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.translate(32, 32);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.fillStyle = 'rgba(5, 11, 15, 0.88)';
+    ctx.strokeStyle = '#ff4fd8';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, -28);
+    ctx.lineTo(25, -3);
+    ctx.lineTo(10, -3);
+    ctx.lineTo(10, 23);
+    ctx.lineTo(-10, 23);
+    ctx.lineTo(-10, -3);
+    ctx.lineTo(-25, -3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -23);
+    ctx.lineTo(18, -5);
+    ctx.lineTo(-18, -5);
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.fillStyle = '#ff4fd8';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(-16, 1, 24, 16, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#7dfffb';
+    ctx.strokeStyle = '#042b30';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(8, 5);
+    ctx.lineTo(21, -2);
+    ctx.lineTo(21, 20);
+    ctx.lineTo(8, 13);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = '#061014';
+    ctx.beginPath();
+    ctx.arc(-5, 9, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    return canvas.toDataURL();
+}
+
+const CAMERA_ICON = createCameraIcon();
+
+function windyPlayerUrl(webcamId, playerType = 'day') {
+    return `https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=${playerType}&webcamId=${webcamId}`;
+}
+
+function windyLiveUrl(webcamId) {
+    return `https://webcams.windy.com/webcams/public/embed/player/${webcamId}/live`;
+}
+
+function youtubeEmbedUrl(videoId) {
+    return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&playsinline=1`;
+}
+
+function youtubeWatchUrl(videoId) {
+    return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+const LIVE_CAMERA_CATALOG = [
+    {
+        id: 'kyiv-rusanivka-earthcam',
+        name: 'Kyiv - Rusanivka',
+        type: 'By og flod',
+        position: [30.596, 50.438],
+        source: 'EarthCam / YouTube',
+        sourceUrl: youtubeWatchUrl('2cyQPN5xQtU'),
+        embedUrl: youtubeEmbedUrl('2cyQPN5xQtU'),
+        keywords: 'kyiv kiev ukraine rusanivka dnipro dnieper live webcam'
+    },
+    {
+        id: 'kyiv-ukraine-webcams',
+        name: 'Ukraine - Multi City Live',
+        type: 'By og status',
+        position: [30.5235, 50.4506],
+        source: 'YouTube',
+        sourceUrl: youtubeWatchUrl('BnUuT5RmfH4'),
+        embedUrl: youtubeEmbedUrl('BnUuT5RmfH4'),
+        keywords: 'ukraine kyiv lviv kharkiv odessa kherson live webcams'
+    },
+    {
+        id: 'odessa-nemo-langeron',
+        name: 'Odesa - Langeron Beach',
+        type: 'Strand og hav',
+        position: [30.762, 46.477],
+        source: 'IPLiveCams',
+        sourceUrl: 'https://www.iplivecams.com/live-cams/dolphinarium-nemo-esplanade-with-a-square-of-fountains-view-odessa-oblast-ukraine/',
+        embedUrl: 'https://www.iplivecams.com/live-cams/dolphinarium-nemo-esplanade-with-a-square-of-fountains-view-odessa-oblast-ukraine/',
+        keywords: 'odesa odessa ukraine langeron beach black sea nemo live webcam'
+    },
+    {
+        id: 'kyiv-maidan-skyline',
+        name: 'Kyiv - Maidan Square',
+        type: 'By og vartegn',
+        position: [30.5235, 50.4506],
+        source: 'SkylineWebcams',
+        sourceUrl: 'https://www.skylinewebcams.com/webcam/ukraine/kyiv-city-council/kyiv/maidan-square.html',
+        embedUrl: 'https://www.skylinewebcams.com/webcam/ukraine/kyiv-city-council/kyiv/maidan-square.html',
+        keywords: 'kyiv kiev ukraine maidan independence square live webcam'
+    },
+    {
+        id: 'jerusalem-western-wall',
+        name: 'Jerusalem - Western Wall',
+        type: 'By og vartegn',
+        position: [35.2345, 31.7767],
+        source: 'SkylineWebcams / YouTube',
+        sourceUrl: youtubeWatchUrl('4M9FPyuTS2M'),
+        embedUrl: youtubeEmbedUrl('4M9FPyuTS2M'),
+        keywords: 'jerusalem israel western wall kotel temple mount live webcam'
+    },
+    {
+        id: 'jerusalem-panorama',
+        name: 'Jerusalem - Panorama',
+        type: 'By og skyline',
+        position: [35.243, 31.778],
+        source: 'YouTube',
+        sourceUrl: youtubeWatchUrl('MgJ-p9bnKgg'),
+        embedUrl: youtubeEmbedUrl('MgJ-p9bnKgg'),
+        keywords: 'jerusalem israel panorama old city live webcam'
+    },
+    {
+        id: 'tel-aviv-yafo',
+        name: 'Tel Aviv-Yafo',
+        type: 'Strand og by',
+        position: [34.7818, 32.0853],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1639421838', 'day'),
+        embedUrl: windyPlayerUrl('1639421838', 'day'),
+        keywords: 'tel aviv yafo israel beach city live webcam'
+    },
+    {
+        id: 'eilat-surf-center',
+        name: 'Eilat - Surf Center',
+        type: 'Strand og hav',
+        position: [34.947, 29.548],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1615385889'),
+        embedUrl: windyLiveUrl('1615385889'),
+        keywords: 'eilat israel red sea surf windsurfing live webcam'
+    },
+    {
+        id: 'istanbul-galata-bridge',
+        name: 'Istanbul - Galata Bridge',
+        type: 'By og trafik',
+        position: [28.974, 41.020],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1573888456', 'day'),
+        embedUrl: windyPlayerUrl('1573888456', 'day'),
+        keywords: 'istanbul turkey galata bridge bosphorus live webcam'
+    },
+    {
+        id: 'istanbul-guzelyali',
+        name: 'Istanbul - Guzelyali',
+        type: 'Kyst og by',
+        position: [29.036, 40.877],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1573537507', 'day'),
+        embedUrl: windyPlayerUrl('1573537507', 'day'),
+        keywords: 'istanbul turkey guzelyali marmara live webcam'
+    },
+    {
+        id: 'antalya-saklikent',
+        name: 'Antalya - Saklikent',
+        type: 'Bjerg og vejr',
+        position: [30.333, 36.837],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1743430549', 'day'),
+        embedUrl: windyPlayerUrl('1743430549', 'day'),
+        keywords: 'antalya turkey saklikent konyaalti mountain live webcam'
+    },
+    {
+        id: 'cph-lake-emdrup',
+        name: 'Copenhagen - Lake Emdrup',
+        type: 'By og vejr',
+        position: [12.537, 55.721],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1725987679', 'day'),
+        embedUrl: windyPlayerUrl('1725987679', 'day'),
+        keywords: 'kobenhavn copenhagen emdrup denmark webcam city weather'
+    },
+    {
+        id: 'paris-eiffel',
+        name: 'Paris - Eiffel Tower View',
+        type: 'By og vartegn',
+        position: [2.3488, 48.8534],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1515017464', 'day'),
+        embedUrl: windyPlayerUrl('1515017464', 'day'),
+        keywords: 'paris france eiffel tower skyline webcam'
+    },
+    {
+        id: 'paris-seine',
+        name: 'Paris - Seine River',
+        type: 'By og flod',
+        position: [2.286, 48.849],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1721599175', 'day'),
+        embedUrl: windyPlayerUrl('1721599175', 'day'),
+        keywords: 'paris france seine river cruise webcam'
+    },
+    {
+        id: 'prague-city',
+        name: 'Prague City',
+        type: 'By og vartegn',
+        position: [14.4378, 50.0755],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1705483562', 'day'),
+        embedUrl: windyPlayerUrl('1705483562', 'day'),
+        keywords: 'prague praha czech republic city webcam'
+    },
+    {
+        id: 'reykjavik-harbour',
+        name: 'Reykjavik Harbour',
+        type: 'Havn og by',
+        position: [-21.9426, 64.1470],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1545635591'),
+        embedUrl: windyLiveUrl('1545635591'),
+        keywords: 'reykjavik iceland harbour live webcam'
+    },
+    {
+        id: 'new-york-water-street',
+        name: 'New York - Water Street',
+        type: 'By og trafik',
+        position: [-74.005, 40.707],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1483962109', 'day'),
+        embedUrl: windyPlayerUrl('1483962109', 'day'),
+        keywords: 'new york manhattan water street fulton traffic webcam'
+    },
+    {
+        id: 'new-york-union-square',
+        name: 'New York - Union Square',
+        type: 'By og trafik',
+        position: [-73.9903, 40.7359],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1483962083', 'day'),
+        embedUrl: windyPlayerUrl('1483962083', 'day'),
+        keywords: 'new york manhattan union square traffic webcam'
+    },
+    {
+        id: 'west-new-york',
+        name: 'West New York - Hudson View',
+        type: 'By og skyline',
+        position: [-74.0143, 40.7879],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1793872488', 'day'),
+        embedUrl: windyPlayerUrl('1793872488', 'day'),
+        keywords: 'west new york hudson manhattan skyline webcam'
+    },
+    {
+        id: 'muir-beach-ocean',
+        name: 'Muir Beach - Ocean Beach',
+        type: 'Kyst og hav',
+        position: [-122.578, 37.862],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1185292026'),
+        embedUrl: windyLiveUrl('1185292026'),
+        keywords: 'california muir beach ocean live webcam'
+    },
+    {
+        id: 'phoenix-west',
+        name: 'Phoenix - West',
+        type: 'By og vejr',
+        position: [-112.074, 33.448],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1669222331'),
+        embedUrl: windyLiveUrl('1669222331'),
+        keywords: 'phoenix arizona city weather live webcam'
+    },
+    {
+        id: 'sydney-princes-highway',
+        name: 'Sydney - Princes Highway',
+        type: 'By og trafik',
+        position: [151.179, -33.911],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1283755513', 'day'),
+        embedUrl: windyPlayerUrl('1283755513', 'day'),
+        keywords: 'sydney australia princes highway traffic webcam'
+    },
+    {
+        id: 'new-zealand-burwood',
+        name: 'Christchurch - Coastal Burwood',
+        type: 'Kyst og surf',
+        position: [172.724, -43.500],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1658893792'),
+        embedUrl: windyLiveUrl('1658893792'),
+        keywords: 'christchurch new zealand burwood surf coast live webcam'
+    },
+    {
+        id: 'mt-fuji-lake-tanuki',
+        name: 'Mount Fuji - Lake Tanuki',
+        type: 'Bjerg og natur',
+        position: [138.560, 35.342],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1349956815', 'day'),
+        embedUrl: windyPlayerUrl('1349956815', 'day'),
+        keywords: 'mount fuji lake tanuki japan nature webcam'
+    },
+    {
+        id: 'mt-fuji-kawaguchiko',
+        name: 'Mount Fuji - Kawaguchiko',
+        type: 'Bjerg og natur',
+        position: [138.765, 35.497],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1349983214', 'day'),
+        embedUrl: windyPlayerUrl('1349983214', 'day'),
+        keywords: 'mount fuji kawaguchiko japan nature webcam'
+    },
+    {
+        id: 'toulouse-bazacle',
+        name: 'Toulouse - Bazacle',
+        type: 'By og flod',
+        position: [1.433, 43.604],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1658331508'),
+        embedUrl: windyLiveUrl('1658331508'),
+        keywords: 'toulouse france bazacle garonne live webcam'
+    },
+    {
+        id: 'xeraco-beach',
+        name: 'Xeraco Beach',
+        type: 'Strand og hav',
+        position: [-0.198, 39.032],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1611097713'),
+        embedUrl: windyLiveUrl('1611097713'),
+        keywords: 'xeraco spain beach sea live webcam'
+    },
+    {
+        id: 'la-baule',
+        name: 'La Baule-Escoublac',
+        type: 'Strand og by',
+        position: [-2.390, 47.286],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1691053273', 'day'),
+        embedUrl: windyPlayerUrl('1691053273', 'day'),
+        keywords: 'la baule escoublac france beach webcam'
+    },
+    {
+        id: 'roubion',
+        name: 'Roubion',
+        type: 'Bjerg og landsby',
+        position: [7.049, 44.090],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1677427884'),
+        embedUrl: windyLiveUrl('1677427884'),
+        keywords: 'roubion france mountain village live webcam'
+    },
+    {
+        id: 'bad-orb',
+        name: 'Bad Orb - Gradierwerk',
+        type: 'By og kursted',
+        position: [9.348, 50.227],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1217169070', 'day'),
+        embedUrl: windyPlayerUrl('1217169070', 'day'),
+        keywords: 'bad orb germany gradierwerk webcam'
+    },
+    {
+        id: 'freeport-nautical-mile',
+        name: 'Freeport - Nautical Mile',
+        type: 'Havn og kyst',
+        position: [-73.583, 40.637],
+        source: 'Windy Webcams',
+        sourceUrl: windyPlayerUrl('1644867521', 'day'),
+        embedUrl: windyPlayerUrl('1644867521', 'day'),
+        keywords: 'freeport new york nautical mile harbour webcam'
+    },
+    {
+        id: 'woodland-park',
+        name: 'Woodland Park',
+        type: 'By og vejr',
+        position: [-105.057, 38.994],
+        source: 'Windy Webcams',
+        sourceUrl: windyLiveUrl('1704994925'),
+        embedUrl: windyLiveUrl('1704994925'),
+        keywords: 'woodland park colorado weather live webcam'
+    },
+    {
+        id: 'cph-city-hall',
+        name: 'Copenhagen City Hall Square',
+        type: 'By og trafik',
+        position: [12.5683, 55.6758],
+        source: 'Webcamtaxi',
+        sourceUrl: 'https://www.webcamtaxi.com/en/denmark/capital-region-of-denmark/copenhagen-city-centre.html',
+        embedUrl: 'https://www.webcamtaxi.com/en/denmark/capital-region-of-denmark/copenhagen-city-centre.html',
+        keywords: 'københavn copenhagen city hall rådhuspladsen traffic denmark webcam'
+    },
+    {
+        id: 'enterprise-nv-road',
+        name: 'Enterprise Road Camera',
+        type: 'Motorvej og trafik',
+        position: [-115.25, 36.02],
+        source: 'Windy Webcams',
+        sourceUrl: 'https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=lifetime&webcamId=1733064652',
+        embedUrl: 'https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=day&webcamId=1733064652',
+        keywords: 'enterprise road highway traffic motorway windy webcam'
+    },
+    {
+        id: 'elk-mountain-i80',
+        name: 'Elk Mountain I-80 Ramp',
+        type: 'Motorvej og vejr',
+        position: [-106.414, 41.687],
+        source: 'Windy Webcams',
+        sourceUrl: 'https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=month&webcamId=1710178367',
+        embedUrl: 'https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=day&webcamId=1710178367',
+        keywords: 'elk mountain i80 interstate highway traffic snow windy webcam'
+    },
+    {
+        id: 'bruksvallarna-ski',
+        name: 'Bruksvallarna Ski Area',
+        type: 'Sneløjpe',
+        position: [12.433, 62.633],
+        source: 'Windy Webcams',
+        sourceUrl: 'https://webcams.windy.com/webcams/public/embed/player?webcamId=1319380190&playerType=day&loop=0&interactive=1',
+        embedUrl: 'https://webcams.windy.com/webcams/public/embed/player?webcamId=1319380190&playerType=day&loop=0&interactive=1',
+        keywords: 'bruksvallarna ski snow trail Sweden windy webcam'
+    },
+    {
+        id: 'cocoa-fl511',
+        name: 'Cocoa FL511 Traffic',
+        type: 'Motorvej og trafik',
+        position: [-80.742, 28.386],
+        source: 'Windy Webcams',
+        sourceUrl: 'https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=day&webcamId=1749379518',
+        embedUrl: 'https://webcams.windy.com/webcams/public/embed/player?forceFullScreenOnOverlayPlay=false&interactive=true&loop=false&playerType=day&webcamId=1749379518',
+        keywords: 'cocoa fl511 highway traffic motorway Florida windy webcam'
+    }
+];
+
 let selectedSatelliteKey = null;
 let isUpdatingFlights = false;
 let lastFlightRequestAt = 0;
@@ -463,6 +928,9 @@ let selectedTrackedSatelliteOrbitRequestId = 0;
 let isLoadingAllSatellites = false;
 let allSatellitesUpdateTimer = null;
 const shipStaticByMmsi = new Map();
+let windUpdateTimer = null;
+let windRefreshRequestId = 0;
+let lastWindUpdateAt = 0;
 
 function clamp(value, min, max) {
     return Math.min(Math.max(value, min), max);
@@ -560,6 +1028,65 @@ function buildFlightDataUrls() {
     const queries = getFlightScopeQueries();
     const localOrigin = window.location.port === '5600' ? '' : LOCAL_PROXY_ORIGIN;
     return queries.map(query => `${localOrigin}/api/flights${query ? `?${query}` : ''}`);
+}
+
+function getLocalApiOrigin() {
+    return window.location.port === '5600' ? '' : LOCAL_PROXY_ORIGIN;
+}
+
+function getVisibleWindBounds() {
+    const rectangle = viewer.camera.computeViewRectangle(viewer.scene.globe.ellipsoid);
+
+    if (!rectangle) {
+        const center = viewer.camera.positionCartographic;
+        const lon = CesiumLib.Math.toDegrees(center.longitude);
+        const lat = CesiumLib.Math.toDegrees(center.latitude);
+        return {
+            west: clamp(lon - 8, -180, 180),
+            south: clamp(lat - 5, -85, 85),
+            east: clamp(lon + 8, -180, 180),
+            north: clamp(lat + 5, -85, 85)
+        };
+    }
+
+    let west = CesiumLib.Math.toDegrees(rectangle.west);
+    let east = CesiumLib.Math.toDegrees(rectangle.east);
+    let south = CesiumLib.Math.toDegrees(rectangle.south);
+    let north = CesiumLib.Math.toDegrees(rectangle.north);
+
+    if (east < west) {
+        east += 360;
+    }
+
+    const centerLon = (west + east) / 2;
+    const centerLat = (south + north) / 2;
+    const lonSpan = Math.min(east - west, WIND_MAX_SCOPE_DEGREES);
+    const latSpan = Math.min(north - south, WIND_MAX_SCOPE_DEGREES * 0.65);
+
+    west = centerLon - lonSpan / 2;
+    east = centerLon + lonSpan / 2;
+    south = clamp(centerLat - latSpan / 2, -85, 85);
+    north = clamp(centerLat + latSpan / 2, -85, 85);
+
+    return {
+        west: CesiumLib.Math.toDegrees(CesiumLib.Math.negativePiToPi(CesiumLib.Math.toRadians(west))),
+        south,
+        east: CesiumLib.Math.toDegrees(CesiumLib.Math.negativePiToPi(CesiumLib.Math.toRadians(east))),
+        north
+    };
+}
+
+function buildWindDataUrl() {
+    const bounds = getVisibleWindBounds();
+    const params = new URLSearchParams({
+        west: bounds.west.toFixed(4),
+        south: bounds.south.toFixed(4),
+        east: bounds.east.toFixed(4),
+        north: bounds.north.toFixed(4),
+        columns: String(WIND_GRID_COLUMNS),
+        rows: String(WIND_GRID_ROWS)
+    });
+    return `${getLocalApiOrigin()}/api/wind?${params}`;
 }
 
 function scheduleFlightUpdate(delayMs = FLIGHT_CAMERA_DEBOUNCE_MS) {
@@ -1445,18 +1972,29 @@ function updateZoomPriority() {
     shipEntities.forEach(entity => {
         entity.zoomVisible = cameraHeight <= PORT_MAX_CAMERA_HEIGHT_M;
     });
+
+    liveCameraEntities.forEach(entity => {
+        entity.zoomVisible = cameraHeight <= LIVE_CAMERA_MAX_CAMERA_HEIGHT_M;
+    });
 }
 
 function setWeatherVisible(visible) {
     weatherEntities.forEach(entity => {
         entity.show = visible;
     });
+    const legend = document.getElementById('wind-legend');
+    if (legend) {
+        legend.style.display = visible ? 'block' : 'none';
+    }
+    if (visible && (weatherEntities.length === 0 || Date.now() - lastWindUpdateAt > WIND_UPDATE_INTERVAL_MS)) {
+        scheduleWindUpdate(0);
+    }
 }
 
 function setShipTrailsVisible(visible) {
     liveShipEntities.forEach(ship => {
         if (ship.trailEntity) {
-            ship.trailEntity.show = visible && ship.entity.show && ship.history && ship.history.length > 1;
+            ship.trailEntity.show = visible && ship.entity.show && isLayerChecked('toggle-ship-traffic') && ship.history && ship.history.length > 1;
         }
     });
 }
@@ -1667,6 +2205,9 @@ function createDetailImageElement(type) {
     } else if (normalizedType === 'skib') {
         image = SHIP_ICON;
         alt = 'Skib';
+    } else if (normalizedType === 'live cam' || normalizedType === 'live kamera') {
+        image = CAMERA_ICON;
+        alt = 'Live kamera';
     }
 
     if (!image) return null;
@@ -1680,10 +2221,35 @@ function createDetailImageElement(type) {
     return wrapper;
 }
 
-function renderDetailBody(element, body, type) {
+function createLiveCameraFrame(camera, compact = false) {
+    const wrapper = document.createElement('div');
+    wrapper.className = compact ? 'detail-live-camera-frame' : '';
+
+    if (camera.embedUrl) {
+        const iframe = document.createElement('iframe');
+        iframe.src = camera.embedUrl;
+        iframe.title = camera.name;
+        iframe.loading = 'lazy';
+        iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+        iframe.referrerPolicy = 'no-referrer-when-downgrade';
+        iframe.setAttribute('allowfullscreen', '');
+        wrapper.appendChild(iframe);
+        return wrapper;
+    }
+
+    const placeholder = document.createElement('div');
+    placeholder.className = compact ? 'detail-live-camera-placeholder' : 'live-camera-placeholder';
+    placeholder.textContent = 'Denne kilde tillader ikke indlejring direkte i appen. Åbn streamen i en ny fane.';
+    wrapper.appendChild(placeholder);
+    return wrapper;
+}
+
+function renderDetailBody(element, body, type, camera = null) {
     clearElement(element);
-    const image = createDetailImageElement(type);
-    if (image) {
+    const image = camera ? null : createDetailImageElement(type);
+    if (camera) {
+        element.appendChild(createLiveCameraFrame(camera, true));
+    } else if (image) {
         element.appendChild(image);
     }
 
@@ -1696,12 +2262,12 @@ function renderDetailBody(element, body, type) {
     });
 }
 
-function showDetailPanel(title, body, watchText = '', type = '') {
+function showDetailPanel(title, body, watchText = '', type = '', camera = null) {
     selectedDetailItem = watchText || title;
     setText('detail-title', title);
     const bodyElement = document.getElementById('detail-body');
     const panel = document.getElementById('detail-panel');
-    if (bodyElement) renderDetailBody(bodyElement, body, type);
+    if (bodyElement) renderDetailBody(bodyElement, body, type, camera);
     if (panel) panel.style.display = 'block';
 }
 
@@ -1710,6 +2276,50 @@ function hideDetailPanel() {
     if (panel) panel.style.display = 'none';
     selectedDetailItem = null;
     clearAllSatelliteTrace();
+}
+
+function hideLiveCameraPanel() {
+    const panel = document.getElementById('live-camera-panel');
+    const wrap = document.getElementById('live-camera-frame-wrap');
+    if (wrap) clearElement(wrap);
+    if (panel) panel.style.display = 'none';
+}
+
+function showLiveCameraPanel(camera) {
+    if (!camera) return;
+
+    hideDetailPanel();
+    setText('live-camera-title', camera.name);
+    setText('live-camera-meta', `${camera.type} | ${camera.source}`);
+
+    const wrap = document.getElementById('live-camera-frame-wrap');
+    if (wrap) {
+        clearElement(wrap);
+        if (camera.embedUrl) {
+            const iframe = document.createElement('iframe');
+            iframe.src = camera.embedUrl;
+            iframe.title = camera.name;
+            iframe.loading = 'lazy';
+            iframe.allow = 'autoplay; fullscreen; picture-in-picture';
+            iframe.referrerPolicy = 'no-referrer-when-downgrade';
+            iframe.setAttribute('allowfullscreen', '');
+            wrap.appendChild(iframe);
+        } else {
+            const placeholder = document.createElement('div');
+            placeholder.className = 'live-camera-placeholder';
+            placeholder.textContent = 'Denne kilde tillader ikke indlejring direkte i appen. Åbn streamen i en ny fane.';
+            wrap.appendChild(placeholder);
+        }
+    }
+
+    const link = document.getElementById('live-camera-link');
+    if (link) {
+        link.href = camera.sourceUrl || camera.embedUrl || '#';
+        link.textContent = `Åbn hos ${camera.source}`;
+    }
+
+    const panel = document.getElementById('live-camera-panel');
+    if (panel) panel.style.display = 'block';
 }
 
 function initDetailPicking() {
@@ -1732,6 +2342,11 @@ function initDetailPicking() {
         if (!picked.id) return;
 
         const entity = picked.id;
+        if (entity.liveCameraData) {
+            showLiveCameraPanel(entity.liveCameraData);
+            return;
+        }
+
         if (entity.satelliteKey) {
             updateSatelliteInfoPanel(entity.satelliteKey);
             showTrackedSatelliteOrbit(entity.satelliteKey);
@@ -1787,6 +2402,11 @@ function focusSearchItem(item) {
         viewer.trackedEntity = undefined;
         viewer.flyTo(item.entity);
     }
+    if (item.entity.liveCameraData) {
+        showLiveCameraPanel(item.entity.liveCameraData);
+        return;
+    }
+
     showDetailPanel(item.label, item.details || describeEntity(item.entity, item.type), item.label, item.type);
 }
 
@@ -2002,7 +2622,7 @@ function appendShipTrailPoint(ship, position) {
 
     if (ship.trailEntity) {
         ship.trailEntity.polyline.positions = ship.history.slice();
-        ship.trailEntity.show = isLayerChecked('toggle-ship-trails') && ship.entity.show && ship.history.length > 1;
+        ship.trailEntity.show = isLayerChecked('toggle-ship-traffic') && ship.entity.show && ship.history.length > 1;
     }
 }
 
@@ -2857,7 +3477,7 @@ async function initEarthquakes() {
     } catch (e) { console.error("Quake fejl", e); }
 }
 
-function initWeatherLayer() {
+function initStaticWeatherZoneLayer() {
     const bands = [
         { name: 'Jetstream Nordatlanten', west: -75, south: 42, east: 5, north: 62, color: Cesium.Color.CYAN.withAlpha(0.12) },
         { name: 'Tropisk fugtbælte', west: -180, south: -8, east: 180, north: 10, color: Cesium.Color.LIME.withAlpha(0.08) },
@@ -2882,6 +3502,159 @@ function initWeatherLayer() {
         weatherEntities.push(entity);
         registerSearchItem('Vejr', band.name, entity, 'weather wind storm vejr', entity.description, `weather:${band.name}`);
     });
+}
+
+function getWindColor(speedKnots) {
+    const speed = clamp(Number(speedKnots) || 0, 0, 55);
+    if (speed < 8) return Cesium.Color.fromCssColorString('#4fb7e8').withAlpha(0.32);
+    if (speed < 16) return Cesium.Color.fromCssColorString('#3fcf9c').withAlpha(0.34);
+    if (speed < 26) return Cesium.Color.fromCssColorString('#f0c84a').withAlpha(0.38);
+    if (speed < 38) return Cesium.Color.fromCssColorString('#e56b5d').withAlpha(0.42);
+    return Cesium.Color.fromCssColorString('#b14bd8').withAlpha(0.48);
+}
+
+function getWindLineColor(speedKnots) {
+    const color = getWindColor(speedKnots);
+    return new Cesium.Color(color.red, color.green, color.blue, 0.85);
+}
+
+function destinationPoint(lonDegrees, latDegrees, bearingDegrees, distanceMeters) {
+    const radius = Cesium.Ellipsoid.WGS84.maximumRadius;
+    const angularDistance = distanceMeters / radius;
+    const bearing = Cesium.Math.toRadians(Number(bearingDegrees));
+    const lat1 = Cesium.Math.toRadians(Number(latDegrees));
+    const lon1 = Cesium.Math.toRadians(Number(lonDegrees));
+    const lat2 = Math.asin(
+        Math.sin(lat1) * Math.cos(angularDistance) +
+        Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing)
+    );
+    const lon2 = lon1 + Math.atan2(
+        Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+        Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2)
+    );
+
+    return [
+        Cesium.Math.toDegrees(lon2),
+        Cesium.Math.toDegrees(lat2)
+    ];
+}
+
+function clearWindLayer() {
+    weatherEntities.forEach(entity => viewer.entities.remove(entity));
+    weatherEntities.length = 0;
+}
+
+function renderWindLayer(samples, meta = {}) {
+    const visible = isLayerChecked('toggle-weather');
+    clearWindLayer();
+
+    samples.forEach(sample => {
+        if (!hasFiniteNumbers(sample.lon, sample.lat, sample.speed, sample.direction)) return;
+
+        const speed = Number(sample.speed);
+        const direction = Number(sample.direction);
+        const halfLat = Math.max(Number(sample.cellLatSpan || 1), 0.25) / 2;
+        const halfLon = Math.max(Number(sample.cellLonSpan || 1), 0.25) / 2;
+        const west = Number(sample.lon) - halfLon;
+        const east = Number(sample.lon) + halfLon;
+        const south = clamp(Number(sample.lat) - halfLat, -85, 85);
+        const north = clamp(Number(sample.lat) + halfLat, -85, 85);
+        const arrowLength = clamp(
+            WIND_ARROW_BASE_LENGTH_M + speed * WIND_ARROW_SPEED_LENGTH_M,
+            WIND_ARROW_BASE_LENGTH_M,
+            WIND_MAX_ARROW_LENGTH_M
+        );
+        const end = destinationPoint(sample.lon, sample.lat, direction, arrowLength);
+        const label = `${formatNumber(speed, 0)} kn`;
+        const description = [
+            'Live vind',
+            `Vind: ${formatNumber(speed, 1)} kn`,
+            `Retning: ${formatNumber(direction, 0)}°`,
+            sample.time ? `Opdateret: ${sample.time}` : ''
+        ].filter(Boolean).join('<br>');
+
+        const cell = viewer.entities.add({
+            name: `Vind ${label}`,
+            show: visible,
+            rectangle: {
+                coordinates: Cesium.Rectangle.fromDegrees(west, south, east, north),
+                height: 0,
+                material: getWindColor(speed),
+                outline: false
+            },
+            description
+        });
+        const arrow = viewer.entities.add({
+            name: `Vindretning ${label}`,
+            show: visible,
+            polyline: {
+                positions: Cesium.Cartesian3.fromDegreesArrayHeights([
+                    sample.lon,
+                    sample.lat,
+                    WIND_SAMPLE_HEIGHT_M,
+                    end[0],
+                    end[1],
+                    WIND_SAMPLE_HEIGHT_M
+                ]),
+                width: clamp(1.5 + speed / 14, 1.5, 5),
+                material: new Cesium.PolylineGlowMaterialProperty({
+                    glowPower: 0.14,
+                    color: getWindLineColor(speed)
+                }),
+                clampToGround: false
+            },
+            label: {
+                text: label,
+                font: '10pt sans-serif',
+                fillColor: Cesium.Color.WHITE,
+                outlineColor: Cesium.Color.BLACK,
+                outlineWidth: 3,
+                style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                pixelOffset: new Cesium.Cartesian2(0, -12),
+                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 3500000)
+            },
+            position: Cesium.Cartesian3.fromDegrees(sample.lon, sample.lat, WIND_SAMPLE_HEIGHT_M),
+            description
+        });
+
+        weatherEntities.push(cell, arrow);
+    });
+
+    lastWindUpdateAt = Date.now();
+    const legend = document.getElementById('wind-legend-meta');
+    if (legend) {
+        const model = meta.source || 'Open-Meteo';
+        const time = samples[0] && samples[0].time ? samples[0].time.replace('T', ' ') : 'nu';
+        legend.textContent = `${model} · ${time} · ${samples.length} punkter`;
+    }
+}
+
+async function updateWindLayer() {
+    if (!isLayerChecked('toggle-weather')) return;
+
+    const requestId = ++windRefreshRequestId;
+    const legend = document.getElementById('wind-legend-meta');
+    if (legend) legend.textContent = 'Henter live vind...';
+
+    try {
+        const response = await fetch(buildWindDataUrl());
+        if (!response.ok) throw new Error(`Vinddata svarede ${response.status}`);
+        const data = await response.json();
+        if (requestId !== windRefreshRequestId) return;
+        renderWindLayer(Array.isArray(data.samples) ? data.samples : [], data.meta || {});
+    } catch (error) {
+        console.warn('Fejl ved hentning af vinddata:', error);
+        if (legend) legend.textContent = 'Vinddata kunne ikke hentes';
+    }
+}
+
+function scheduleWindUpdate(delayMs = WIND_CAMERA_DEBOUNCE_MS) {
+    window.clearTimeout(windUpdateTimer);
+    windUpdateTimer = window.setTimeout(updateWindLayer, delayMs);
+}
+
+function initWeatherLayer() {
+    setWeatherVisible(false);
 }
 
 function parseCsvRows(text) {
@@ -3022,6 +3795,74 @@ async function initAirports() {
         setDataStatus('status-airports', 'error', 'Fejl');
         console.warn('Fejl ved hentning af lufthavne:', e);
     }
+}
+
+function addLiveCameraEntity(camera) {
+    if (!camera || !Array.isArray(camera.position)) return false;
+    const [lon, lat] = camera.position;
+    if (!hasFiniteNumbers(lon, lat)) return false;
+
+    const key = `livecam:${camera.id}`;
+    if (searchableByKey.has(key)) return false;
+
+    const position = Cesium.Cartesian3.fromDegrees(lon, lat, 80);
+    if (!hasValidCartesian(position)) return false;
+
+    const description = [
+        'Live kamera',
+        `Type: ${camera.type}`,
+        `Kilde: ${camera.source}`,
+        `Stream: ${camera.sourceUrl}`
+    ].join('<br>');
+
+    const entity = viewer.entities.add({
+        name: camera.name,
+        position,
+        billboard: {
+            image: CAMERA_ICON,
+            scale: 0.5,
+            disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE,
+            distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, LIVE_CAMERA_MAX_CAMERA_HEIGHT_M)
+        },
+        description
+    });
+
+    entity.liveCameraData = camera;
+    entity.baseScale = 0.5;
+    entity.filterVisible = true;
+    entity.zoomVisible = true;
+    liveCameraEntities.push(entity);
+    registerSearchItem('Live cam', camera.name, entity, `${camera.type} ${camera.source} ${camera.keywords}`, description, key);
+    return true;
+}
+
+async function loadExtraLiveCameras() {
+    try {
+        const response = await fetch(`/api/live-cameras?limit=${EXTRA_LIVE_CAMERA_LIMIT}`);
+        if (!response.ok) throw new Error(`Live camera API svarede ${response.status}`);
+        const data = await response.json();
+        const cameras = Array.isArray(data.cameras) ? data.cameras : [];
+        let added = 0;
+
+        cameras.forEach(camera => {
+            if (addLiveCameraEntity(camera)) added += 1;
+        });
+
+        if (added > 0) {
+            console.info(`Tilfojede ${added} ekstra live-kameraer fra ${data.meta && data.meta.source ? data.meta.source : 'ekstern kilde'}.`);
+            refreshVisibleSideScope();
+        } else if (data.meta && data.meta.disabled) {
+            console.info('Ekstra live-kameraer er ikke hentet:', data.meta.reason);
+        }
+    } catch (error) {
+        console.warn('Fejl ved hentning af ekstra live-kameraer:', error);
+    }
+}
+
+function initLiveCameras() {
+    LIVE_CAMERA_CATALOG.forEach(addLiveCameraEntity);
+    refreshVisibleSideScope();
+    loadExtraLiveCameras();
 }
 
 // 7. FUNKTION: MARITIME LAG (SKIBE & MILITÆR)
@@ -3284,11 +4125,15 @@ const layerGroups = [
     },
     {
         parentId: 'toggle-water',
-        children: ['toggle-ships', 'toggle-ship-traffic', 'toggle-ship-trails', 'toggle-military']
+        children: ['toggle-ships', 'toggle-ship-traffic', 'toggle-military']
     },
     {
         parentId: 'toggle-nature-light',
         children: ['toggle-quakes', 'toggle-weather', 'toggle-daynight']
+    },
+    {
+        parentId: 'toggle-live',
+        children: ['toggle-live-cameras']
     }
 ];
 
@@ -3321,7 +4166,7 @@ function applyLayerSideEffects() {
     refreshVisibleSideScope();
     setAllSatellitesVisible(isLayerChecked('toggle-all-satellites'));
     setWeatherVisible(isLayerChecked('toggle-weather'));
-    setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
+    setShipTrailsVisible(true);
     viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
     refreshAllVisibleSatelliteTraces();
     updateSatelliteControlPanel();
@@ -3397,9 +4242,6 @@ addLayerToggleListener('toggle-ship-traffic', event => {
         closeAIS();
     }
 });
-addLayerToggleListener('toggle-ship-trails', () => {
-    setShipTrailsVisible(isLayerChecked('toggle-ship-trails'));
-});
 addLayerToggleListener('toggle-planes', event => {
     refreshVisibleSideScope();
     if (event.target.checked) {
@@ -3410,10 +4252,16 @@ addLayerToggleListener('toggle-airports', refreshVisibleSideScope);
 addLayerToggleListener('toggle-military', refreshVisibleSideScope);
 addLayerToggleListener('toggle-weather', event => {
     setWeatherVisible(event.target.checked);
+    if (event.target.checked) {
+        scheduleWindUpdate(0);
+    } else {
+        clearWindLayer();
+    }
 });
 addLayerToggleListener('toggle-daynight', event => {
     viewer.scene.globe.enableLighting = event.target.checked;
 });
+addLayerToggleListener('toggle-live-cameras', refreshVisibleSideScope);
 syncLayerGroupStates();
 
 addLayerToggleListener('toggle-visible-satellite-traces', () => {
@@ -3445,6 +4293,7 @@ addOptionalEventListener('add-watchlist-item', 'click', () => {
     if (input) input.value = '';
 });
 addOptionalEventListener('close-detail-panel', 'click', hideDetailPanel);
+addOptionalEventListener('close-live-camera', 'click', hideLiveCameraPanel);
 addOptionalEventListener('detail-watch', 'click', () => {
     addWatchlistItem(selectedDetailItem);
 });
@@ -3454,6 +4303,9 @@ viewer.camera.moveEnd.addEventListener(() => {
     updatePlaneBillboardRotations();
     refreshAllVisibleSatelliteTraces();
     scheduleFlightUpdate();
+    if (isLayerChecked('toggle-weather')) {
+        scheduleWindUpdate();
+    }
     scheduleAisSubscription();
 });
 
@@ -3485,6 +4337,7 @@ if (isLayerChecked('toggle-quakes')) {
 }
 initWeatherLayer();
 initMaritimeLayers();
+initLiveCameras();
 initAirports();
 restoreAisShipCache();
 if (isLayerChecked('toggle-ship-traffic')) {
@@ -3496,6 +4349,11 @@ if (isLayerChecked('toggle-planes')) {
 updateSatelliteData();
 setInterval(updateSatelliteData, 5000);
 setInterval(() => scheduleFlightUpdate(0), FLIGHT_UPDATE_INTERVAL_MS);
+setInterval(() => {
+    if (isLayerChecked('toggle-weather')) {
+        scheduleWindUpdate(0);
+    }
+}, WIND_UPDATE_INTERVAL_MS);
 
 
 

@@ -11,6 +11,7 @@ Lokal Cesium-baseret kort-app med satellitter, skibe, fly, lufthavne, jordskælv
 ```env
 CESIUM_ION_TOKEN=...
 AIS_API_KEY=...
+WINDY_WEBCAMS_API_KEY=...
 ```
 
 4. Start appen:
@@ -39,7 +40,11 @@ Bemærk: AIS-streamen åbnes stadig fra browseren. Det betyder, at AIS-nøglen k
 - OurAirports til lufthavnsdata via lokal proxy
 - CelesTrak/Retlector til TLE-satellitdata via lokal proxy
 - USGS til jordskælv
+- Open-Meteo til live vindkort
+- Windy Webcams til op til 200 ekstra live-kameraer via lokal proxy
 
 ## Lag
 
-`Vejrzoner` er statiske, brede vejrområder som jetstream- og stormspor-zoner. Det er ikke live vejrdata.
+`Live kameraer` viser de indbyggede kameraer med det samme. Hvis `WINDY_WEBCAMS_API_KEY` er sat i `.env`, henter serveren desuden op til 200 ekstra kameraer fra Windy Webcams via `/api/live-cameras`.
+
+`Live vindkort` henter aktuelle 10m-vinddata for det område, kameraet viser. Farverne viser vindstyrke i knob, og stregerne viser vindretning.

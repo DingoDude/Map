@@ -62,7 +62,6 @@
                 <label class="layer-item layer-parent"><span>Vand</span><input type="checkbox" id="toggle-water"></label>
                 <label class="layer-item layer-child"><span>Civile havne</span><input type="checkbox" id="toggle-ships" checked></label>
                 <label class="layer-item layer-child"><span>Skibstrafik</span><input type="checkbox" id="toggle-ship-traffic"></label>
-                <label class="layer-item layer-child"><span>Skibsspor</span><input type="checkbox" id="toggle-ship-trails"></label>
                 <label class="layer-item layer-child"><span>Militær flåde</span><input type="checkbox" id="toggle-military"></label>
             </div>
         </div>
@@ -70,15 +69,21 @@
             <div class="layer-list">
                 <label class="layer-item layer-parent"><span>Natur og lys</span><input type="checkbox" id="toggle-nature-light"></label>
                 <label class="layer-item layer-child"><span>Jordskælv</span><input type="checkbox" id="toggle-quakes"></label>
-                <label class="layer-item layer-child"><span>Vejrzoner</span><input type="checkbox" id="toggle-weather"></label>
+                <label class="layer-item layer-child"><span>Live vindkort</span><input type="checkbox" id="toggle-weather"></label>
                 <label class="layer-item layer-child"><span>Dag/nat</span><input type="checkbox" id="toggle-daynight"></label>
+            </div>
+        </div>
+        <div class="layer-group">
+            <div class="layer-list">
+                <label class="layer-item layer-parent"><span>Live video</span><input type="checkbox" id="toggle-live"></label>
+                <label class="layer-item layer-child"><span>Live kameraer</span><input type="checkbox" id="toggle-live-cameras" checked></label>
             </div>
         </div>
     </div>
 
     <div class="tab-panel" id="tab-search">
         <p class="section-title">Søg</p>
-        <input id="search-box" type="search" placeholder="Skib, fly, lufthavn, havn...">
+        <input id="search-box" type="search" placeholder="Skib, fly, lufthavn, live cam...">
         <div id="search-results"></div>
         <div class="control-group">
             <p class="section-title">Watchlist</p>
@@ -117,6 +122,12 @@
 </div>
 
     <div id="altitude-display">Højde: Henter...</div>
+    <div id="wind-legend">
+        <strong>Live vind</strong>
+        <div class="wind-scale" aria-hidden="true"></div>
+        <div class="wind-scale-labels"><span>0</span><span>15</span><span>30</span><span>45+ kn</span></div>
+        <div id="wind-legend-meta">Henter live vind...</div>
+    </div>
     <div id="app-error"></div>
 
     <div id="satellite-info">
@@ -146,6 +157,14 @@
         <h3 id="detail-title">Detaljer</h3>
         <div class="detail-body" id="detail-body"></div>
         <button id="detail-watch" type="button">Tilføj watch</button>
+    </div>
+
+    <div id="live-camera-panel" aria-live="polite">
+        <button class="close-button" id="close-live-camera" aria-label="Luk">x</button>
+        <h3 id="live-camera-title">Live kamera</h3>
+        <p id="live-camera-meta"></p>
+        <div id="live-camera-frame-wrap"></div>
+        <a id="live-camera-link" href="#" target="_blank" rel="noopener noreferrer">Åbn stream</a>
     </div>
 
     <div id="cesiumContainer"></div>

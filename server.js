@@ -6,6 +6,8 @@ const PORT = Number(process.env.PORT || 5600);
 const ROOT = __dirname;
 const OPEN_SKY_URL = 'https://opensky-network.org/api/states/all';
 const AIRPORTS_SOURCE_URL = 'https://davidmegginson.github.io/ourairports-data/airports.csv';
+const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
+const WINDY_WEBCAMS_URL = 'https://api.windy.com/webcams/api/v3/webcams';
 const TLE_SOURCES = {
     stations: [
         'https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle',
@@ -23,8 +25,13 @@ const FLIGHT_RATE_LIMIT_TTL_MS = 120000;
 const AIRPORT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const TLE_CACHE_TTL_MS = 60 * 60 * 1000;
 const TLE_REQUEST_TIMEOUT_MS = 15000;
+const WIND_CACHE_TTL_MS = 10 * 60 * 1000;
+const LIVE_CAMERA_CACHE_TTL_MS = 60 * 60 * 1000;
+const WIND_MAX_POINTS = 48;
 const TLE_CACHE_DIR = path.join(ROOT, '.cache');
 const flightCache = new Map();
+const windCache = new Map();
+let liveCameraCache = null;
 const tleCache = new Map();
 let airportCache = null;
 let openSkyRateLimitedUntil = 0;
@@ -270,6 +277,129 @@ async function proxyAirports(request, response) {
     }
 }
 
+function clampNumber(value, min, max, fallback) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.min(Math.max(numeric, min), max);
+}
+
+function buildWindSamplesFromBounds(requestUrl) {
+    let west = clampNumber(requestUrl.searchParams.get('west'), -180, 180, 8);
+    let east = clampNumber(requestUrl.searchParams.get('east'), -180, 180, 16);
+    const south = clampNumber(requestUrl.searchParams.get('south'), -85, 85, 52);
+    const north = clampNumber(requestUrl.searchParams.get('north'), -85, 85, 58);
+    const columns = Math.round(clampNumber(requestUrl.searchParams.get('columns'), 3, 8, 7));
+    const rows = Math.round(clampNumber(requestUrl.searchParams.get('rows'), 3, 6, 5));
+    const pointCount = Math.min(columns * rows, WIND_MAX_POINTS);
+
+    if (east < west) east += 360;
+
+    const actualColumns = Math.max(1, Math.min(columns, pointCount));
+    const actualRows = Math.max(1, Math.ceil(pointCount / actualColumns));
+    const lonSpan = Math.max(east - west, 0.5);
+    const latSpan = Math.max(north - south, 0.5);
+    const lonStep = lonSpan / actualColumns;
+    const latStep = latSpan / actualRows;
+    const samples = [];
+
+    for (let row = 0; row < actualRows; row += 1) {
+        for (let column = 0; column < actualColumns; column += 1) {
+            if (samples.length >= pointCount) break;
+            let lon = west + lonStep * (column + 0.5);
+            if (lon > 180) lon -= 360;
+            const lat = south + latStep * (row + 0.5);
+            samples.push({
+                lon,
+                lat,
+                cellLonSpan: lonStep,
+                cellLatSpan: latStep
+            });
+        }
+    }
+
+    return samples;
+}
+
+function normalizeOpenMeteoCurrent(payload) {
+    if (Array.isArray(payload)) return payload;
+    return payload ? [payload] : [];
+}
+
+async function proxyWind(request, response) {
+    const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+    const samples = buildWindSamplesFromBounds(requestUrl);
+    const cacheKey = samples
+        .map(sample => `${sample.lat.toFixed(3)},${sample.lon.toFixed(3)}`)
+        .join('|');
+    const now = Date.now();
+    const cached = windCache.get(cacheKey);
+
+    if (cached && cached.expiresAt > now) {
+        send(response, 200, cached.body, cached.headers);
+        return;
+    }
+
+    try {
+        const weatherUrl = new URL(OPEN_METEO_URL);
+        weatherUrl.searchParams.set('latitude', samples.map(sample => sample.lat.toFixed(4)).join(','));
+        weatherUrl.searchParams.set('longitude', samples.map(sample => sample.lon.toFixed(4)).join(','));
+        weatherUrl.searchParams.set('current', 'wind_speed_10m,wind_direction_10m');
+        weatherUrl.searchParams.set('wind_speed_unit', 'kn');
+        weatherUrl.searchParams.set('timezone', 'auto');
+
+        const weatherResponse = await fetch(weatherUrl, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'SpaceEarthControlCenter/1.0 (local map app)'
+            }
+        });
+
+        if (!weatherResponse.ok) {
+            throw new Error(`Open-Meteo svarede ${weatherResponse.status}`);
+        }
+
+        const payload = normalizeOpenMeteoCurrent(await weatherResponse.json());
+        const windSamples = samples.map((sample, index) => {
+            const item = payload[index] || {};
+            const current = item.current || {};
+            return {
+                lon: sample.lon,
+                lat: sample.lat,
+                cellLonSpan: sample.cellLonSpan,
+                cellLatSpan: sample.cellLatSpan,
+                speed: Number(current.wind_speed_10m),
+                direction: Number(current.wind_direction_10m),
+                time: current.time || ''
+            };
+        }).filter(sample => Number.isFinite(sample.speed) && Number.isFinite(sample.direction));
+
+        const body = JSON.stringify({
+            meta: {
+                source: 'Open-Meteo',
+                unit: 'kn',
+                generatedAt: new Date().toISOString()
+            },
+            samples: windSamples
+        });
+        const headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            'X-Wind-Data-Source': 'open-meteo'
+        };
+
+        windCache.set(cacheKey, {
+            body,
+            headers,
+            expiresAt: now + WIND_CACHE_TTL_MS
+        });
+        send(response, 200, body, headers);
+    } catch (error) {
+        console.error('Wind proxy error:', error);
+        send(response, 502, JSON.stringify({ samples: [], error: 'Kunne ikke hente vinddata.' }), {
+            'Content-Type': 'application/json; charset=utf-8'
+        });
+    }
+}
+
 async function proxyTle(request, response) {
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
     const sourceName = requestUrl.pathname.endsWith('/active') ? 'active' : 'stations';
@@ -348,6 +478,122 @@ async function proxyTle(request, response) {
     }
 }
 
+function normalizeWindyCamera(webcam) {
+    const location = webcam.location || {};
+    const player = webcam.player || {};
+    const urls = webcam.urls || {};
+    const categories = Array.isArray(webcam.categories) ? webcam.categories : [];
+    const lat = Number(location.latitude ?? location.lat);
+    const lon = Number(location.longitude ?? location.lon ?? location.lng);
+    const id = String(webcam.id || '').trim();
+
+    if (!id || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+    const title = String(webcam.title || webcam.name || `Windy webcam ${id}`).trim();
+    const categoryNames = categories
+        .map(category => category && (category.name || category.id))
+        .filter(Boolean);
+    const playerUrl = player.day || player.live || player.month || player.year || player.lifetime || urls.detail || urls.webcam;
+
+    if (!playerUrl) return null;
+
+    return {
+        id: `windy-${id}`,
+        name: title,
+        type: categoryNames[0] || 'Live kamera',
+        position: [lon, lat],
+        source: 'Windy Webcams',
+        sourceUrl: urls.detail || urls.webcam || playerUrl,
+        embedUrl: playerUrl,
+        keywords: `${title} ${location.city || ''} ${location.region || ''} ${location.country || ''} ${categoryNames.join(' ')} windy webcam`
+    };
+}
+
+async function proxyLiveCameras(request, response) {
+    const apiKey = process.env.WINDY_WEBCAMS_API_KEY || '';
+    if (!apiKey) {
+        send(response, 200, JSON.stringify({
+            meta: {
+                source: 'Windy Webcams',
+                disabled: true,
+                reason: 'WINDY_WEBCAMS_API_KEY mangler'
+            },
+            cameras: []
+        }), { 'Content-Type': 'application/json; charset=utf-8' });
+        return;
+    }
+
+    const now = Date.now();
+    if (liveCameraCache && liveCameraCache.expiresAt > now) {
+        send(response, 200, liveCameraCache.body, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'X-Live-Camera-Data-Source': 'cache'
+        });
+        return;
+    }
+
+    try {
+        const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+        const limit = Math.min(Math.max(Number(requestUrl.searchParams.get('limit')) || 200, 1), 200);
+        const windyUrl = new URL(WINDY_WEBCAMS_URL);
+        windyUrl.searchParams.set('limit', String(limit));
+        windyUrl.searchParams.set('offset', '0');
+        windyUrl.searchParams.set('include', 'categories,location,player,urls');
+        windyUrl.searchParams.set('lang', 'en');
+        windyUrl.searchParams.set('sortBy', 'popularity');
+        windyUrl.searchParams.set('sortDirection', 'desc');
+
+        const windyResponse = await fetch(windyUrl, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'SpaceEarthControlCenter/1.0 (local map app)',
+                'x-windy-api-key': apiKey
+            }
+        });
+
+        if (!windyResponse.ok) {
+            throw new Error(`Windy Webcams svarede ${windyResponse.status}`);
+        }
+
+        const payload = await windyResponse.json();
+        const rawCameras = Array.isArray(payload)
+            ? payload
+            : Array.isArray(payload.webcams)
+                ? payload.webcams
+                : Array.isArray(payload.result && payload.result.webcams)
+                    ? payload.result.webcams
+                    : [];
+        const cameras = rawCameras.map(normalizeWindyCamera).filter(Boolean).slice(0, limit);
+        const body = JSON.stringify({
+            meta: {
+                source: 'Windy Webcams',
+                generatedAt: new Date().toISOString(),
+                count: cameras.length
+            },
+            cameras
+        });
+
+        liveCameraCache = {
+            body,
+            expiresAt: now + LIVE_CAMERA_CACHE_TTL_MS
+        };
+
+        send(response, 200, body, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'X-Live-Camera-Data-Source': 'windy'
+        });
+    } catch (error) {
+        console.error('Live camera proxy error:', error);
+        send(response, 502, JSON.stringify({
+            meta: {
+                source: 'Windy Webcams',
+                error: 'Kunne ikke hente ekstra live-kameraer'
+            },
+            cameras: []
+        }), { 'Content-Type': 'application/json; charset=utf-8' });
+    }
+}
+
 function serveStatic(request, response) {
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
     const requestedPath = requestUrl.pathname === '/' ? '/map.html' : requestUrl.pathname;
@@ -387,6 +633,16 @@ const server = http.createServer((request, response) => {
 
     if (request.url.startsWith('/api/airports')) {
         proxyAirports(request, response);
+        return;
+    }
+
+    if (request.url.startsWith('/api/wind')) {
+        proxyWind(request, response);
+        return;
+    }
+
+    if (request.url.startsWith('/api/live-cameras')) {
+        proxyLiveCameras(request, response);
         return;
     }
 
