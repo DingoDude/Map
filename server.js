@@ -344,7 +344,7 @@ async function proxyWind(request, response) {
         weatherUrl.searchParams.set('latitude', samples.map(sample => sample.lat.toFixed(4)).join(','));
         weatherUrl.searchParams.set('longitude', samples.map(sample => sample.lon.toFixed(4)).join(','));
         weatherUrl.searchParams.set('current', 'wind_speed_10m,wind_direction_10m');
-        weatherUrl.searchParams.set('wind_speed_unit', 'kn');
+        weatherUrl.searchParams.set('wind_speed_unit', 'ms');
         weatherUrl.searchParams.set('timezone', 'auto');
 
         const weatherResponse = await fetch(weatherUrl, {
@@ -376,7 +376,7 @@ async function proxyWind(request, response) {
         const body = JSON.stringify({
             meta: {
                 source: 'Open-Meteo',
-                unit: 'kn',
+                unit: 'm/s',
                 generatedAt: new Date().toISOString()
             },
             samples: windSamples

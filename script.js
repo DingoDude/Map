@@ -60,6 +60,8 @@ const WIND_ARROW_BASE_LENGTH_M = 45000;
 const WIND_ARROW_SPEED_LENGTH_M = 6000;
 const WIND_MAX_ARROW_LENGTH_M = 170000;
 const WIND_SAMPLE_HEIGHT_M = 1400;
+const WIND_ARROW_MIN_SCALE = 0.28;
+const WIND_ARROW_MAX_SCALE = 0.92;
 const WATCHLIST_KEY = 'space-control-watchlist-v1';
 const AIRPORT_LABEL_NEAR_DISTANCE_M = 900000;
 const AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M = 3500000;
@@ -69,13 +71,26 @@ const EXTRA_LIVE_CAMERA_LIMIT = 200;
 const ALL_SATELLITES_TLE_URL = '/api/tle/active';
 const ALL_SATELLITES_UPDATE_INTERVAL_MS = 30000;
 const ALL_SATELLITES_BATCH_SIZE = 250;
-const ALL_SATELLITES_POINT_SIZE = 5;
+const ALL_SATELLITES_POINT_SIZE = 7;
+const ALL_SATELLITES_ANIMATION_FRAME_MS = 33;
+const ALL_SATELLITE_TRACE_REFRESH_MS = 1200;
+const ALL_SATELLITE_SELECTED_TRACE_REFRESH_MS = 250;
+const ALL_SATELLITES_NEAR_DISTANCE_M = 1200000;
+const ALL_SATELLITES_FAR_DISTANCE_M = 52000000;
+const ALL_SATELLITES_NEAR_SCALE = 1.18;
+const ALL_SATELLITES_FAR_SCALE = 0.52;
+const ALL_SATELLITES_NEAR_ALPHA = 0.96;
+const ALL_SATELLITES_FAR_ALPHA = 0.38;
 const SATELLITE_FULL_ORBIT_SAMPLE_COUNT = 180;
 const SATELLITE_FULL_ORBIT_MIN_STEP_MINUTES = 0.5;
 const SATELLITE_FULL_ORBIT_MAX_STEP_MINUTES = 8;
 const SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES = 93;
 const ALL_SATELLITE_TRACE_WIDTH = 2;
 const ALL_SATELLITE_TRACE_ALL_LIMIT = 180;
+const KEYBOARD_MOVE_HEIGHT_FACTOR = 0.018;
+const KEYBOARD_MOVE_MIN_METERS = 1500;
+const KEYBOARD_MOVE_MAX_METERS = 900000;
+const KEYBOARD_MOVE_FAST_MULTIPLIER = 2.4;
 const ALL_SATELLITE_CATEGORY_TOGGLES = {
     starlink: 'toggle-sat-starlink',
     oneweb: 'toggle-sat-oneweb',
@@ -921,12 +936,16 @@ let allSatelliteRecords = [];
 let allSatelliteTraceEntity = null;
 let allVisibleSatelliteTraceEntities = [];
 let selectedAllSatelliteRecord = null;
+let lastAllSatelliteTraceRefreshAt = 0;
+let lastSelectedAllSatelliteTraceRefreshAt = 0;
 let selectedTrackedSatelliteOrbitEntity = null;
 let visibleTrackedSatelliteOrbitEntities = new Map();
 let visibleTrackedSatelliteOrbitRefreshId = 0;
 let selectedTrackedSatelliteOrbitRequestId = 0;
 let isLoadingAllSatellites = false;
 let allSatellitesUpdateTimer = null;
+let lastAllSatelliteAnimationFrameAt = 0;
+const pressedNavigationKeys = new Set();
 const shipStaticByMmsi = new Map();
 let windUpdateTimer = null;
 let windRefreshRequestId = 0;
@@ -942,6 +961,121 @@ function debounce(fn, delayMs) {
         window.clearTimeout(timer);
         timer = window.setTimeout(() => fn(...args), delayMs);
     };
+}
+
+function isTypingTarget(target) {
+    if (!target) return false;
+    const tagName = String(target.tagName || '').toUpperCase();
+    return target.isContentEditable ||
+        tagName === 'INPUT' ||
+        tagName === 'TEXTAREA' ||
+        tagName === 'SELECT' ||
+        tagName === 'BUTTON';
+}
+
+function normalizeNavigationKey(key) {
+    const value = String(key || '').toLowerCase();
+    if (value === 'arrowup' || value === 'w') return 'north';
+    if (value === 'arrowdown' || value === 's') return 'south';
+    if (value === 'arrowleft' || value === 'a') return 'west';
+    if (value === 'arrowright' || value === 'd') return 'east';
+    if (value === 'q') return 'zoomIn';
+    if (value === 'e') return 'zoomOut';
+    return '';
+}
+
+function getKeyboardMoveDistance() {
+    const cameraHeight = viewer.camera.positionCartographic
+        ? viewer.camera.positionCartographic.height
+        : KEYBOARD_MOVE_MIN_METERS;
+    return clamp(
+        cameraHeight * KEYBOARD_MOVE_HEIGHT_FACTOR,
+        KEYBOARD_MOVE_MIN_METERS,
+        KEYBOARD_MOVE_MAX_METERS
+    );
+}
+
+function updateKeyboardCameraNavigation() {
+    if (pressedNavigationKeys.size === 0) return;
+
+    let moveAmount = getKeyboardMoveDistance();
+    if (pressedNavigationKeys.has('shift')) {
+        moveAmount *= KEYBOARD_MOVE_FAST_MULTIPLIER;
+    }
+
+    const cameraCartographic = viewer.camera.positionCartographic;
+    if (!cameraCartographic) return;
+
+    let longitude = cameraCartographic.longitude;
+    let latitude = cameraCartographic.latitude;
+    let height = cameraCartographic.height;
+
+    const angularStep = moveAmount / viewer.scene.globe.ellipsoid.maximumRadius;
+    const latitudeStep = angularStep;
+    const longitudeStep = angularStep / Math.max(Math.cos(latitude), 0.15);
+
+    if (pressedNavigationKeys.has('north')) {
+        latitude += latitudeStep;
+    }
+    if (pressedNavigationKeys.has('south')) {
+        latitude -= latitudeStep;
+    }
+    if (pressedNavigationKeys.has('west')) {
+        longitude -= longitudeStep;
+    }
+    if (pressedNavigationKeys.has('east')) {
+        longitude += longitudeStep;
+    }
+    if (pressedNavigationKeys.has('zoomIn')) {
+        height = Math.max(height - moveAmount * 1.8, 200);
+    }
+    if (pressedNavigationKeys.has('zoomOut')) {
+        height += moveAmount * 1.8;
+    }
+
+    latitude = clamp(latitude, CesiumLib.Math.toRadians(-89.5), CesiumLib.Math.toRadians(89.5));
+    longitude = CesiumLib.Math.negativePiToPi(longitude);
+
+    viewer.camera.setView({
+        destination: CesiumLib.Cartesian3.fromRadians(longitude, latitude, height),
+        orientation: {
+            heading: viewer.camera.heading,
+            pitch: viewer.camera.pitch,
+            roll: viewer.camera.roll
+        }
+    });
+}
+
+function initKeyboardNavigation() {
+    window.addEventListener('keydown', event => {
+        if (isTypingTarget(event.target)) return;
+
+        const direction = normalizeNavigationKey(event.key);
+        if (direction) {
+            pressedNavigationKeys.add(direction);
+            event.preventDefault();
+        }
+
+        if (event.key === 'Shift') {
+            pressedNavigationKeys.add('shift');
+        }
+    });
+
+    window.addEventListener('keyup', event => {
+        const direction = normalizeNavigationKey(event.key);
+        if (direction) {
+            pressedNavigationKeys.delete(direction);
+            event.preventDefault();
+        }
+
+        if (event.key === 'Shift') {
+            pressedNavigationKeys.delete('shift');
+        }
+    });
+
+    window.addEventListener('blur', () => {
+        pressedNavigationKeys.clear();
+    });
 }
 
 function addOptionalEventListener(id, eventName, handler) {
@@ -1539,17 +1673,29 @@ function formatAllSatelliteDetails(record) {
 }
 
 function getAllSatelliteColor(record) {
-    if (record.satelliteType === 'starlink') return Cesium.Color.CYAN.withAlpha(0.82);
-    if (record.satelliteType === 'oneweb') return Cesium.Color.LIME.withAlpha(0.78);
-    if (record.satelliteType === 'navigation') return Cesium.Color.YELLOW.withAlpha(0.82);
-    if (record.satelliteType === 'weather') return Cesium.Color.ORANGE.withAlpha(0.82);
-    if (record.satelliteType === 'earthObservation') return Cesium.Color.SPRINGGREEN.withAlpha(0.78);
-    if (record.satelliteType === 'communications') return Cesium.Color.MAGENTA.withAlpha(0.76);
-    if (record.satelliteType === 'crewed') return Cesium.Color.RED.withAlpha(0.86);
+    if (record.satelliteType === 'starlink') return Cesium.Color.fromCssColorString('#67d6ff').withAlpha(0.88);
+    if (record.satelliteType === 'oneweb') return Cesium.Color.fromCssColorString('#8cf27a').withAlpha(0.84);
+    if (record.satelliteType === 'navigation') return Cesium.Color.fromCssColorString('#ffd84d').withAlpha(0.88);
+    if (record.satelliteType === 'weather') return Cesium.Color.fromCssColorString('#ff9f5a').withAlpha(0.86);
+    if (record.satelliteType === 'earthObservation') return Cesium.Color.fromCssColorString('#4ee6b2').withAlpha(0.84);
+    if (record.satelliteType === 'communications') return Cesium.Color.fromCssColorString('#ff6ecf').withAlpha(0.82);
+    if (record.satelliteType === 'crewed') return Cesium.Color.fromCssColorString('#ff6262').withAlpha(0.92);
     if (record.satelliteType === 'science') {
-        return Cesium.Color.MEDIUMPURPLE.withAlpha(0.78);
+        return Cesium.Color.fromCssColorString('#b98cff').withAlpha(0.84);
     }
-    return Cesium.Color.WHITE.withAlpha(0.68);
+    return Cesium.Color.fromCssColorString('#e8eef5').withAlpha(0.72);
+}
+
+function getAllSatelliteOutlineColor(record) {
+    if (record.satelliteType === 'starlink') return Cesium.Color.fromCssColorString('#11364a').withAlpha(0.92);
+    if (record.satelliteType === 'oneweb') return Cesium.Color.fromCssColorString('#173b16').withAlpha(0.92);
+    if (record.satelliteType === 'navigation') return Cesium.Color.fromCssColorString('#4d3f08').withAlpha(0.92);
+    if (record.satelliteType === 'weather') return Cesium.Color.fromCssColorString('#4a2410').withAlpha(0.92);
+    if (record.satelliteType === 'earthObservation') return Cesium.Color.fromCssColorString('#12392d').withAlpha(0.92);
+    if (record.satelliteType === 'communications') return Cesium.Color.fromCssColorString('#4a123d').withAlpha(0.92);
+    if (record.satelliteType === 'crewed') return Cesium.Color.fromCssColorString('#4f1515').withAlpha(0.95);
+    if (record.satelliteType === 'science') return Cesium.Color.fromCssColorString('#31204a').withAlpha(0.92);
+    return Cesium.Color.fromCssColorString('#1d2732').withAlpha(0.9);
 }
 
 function propagateSatelliteRecord(record, date, gmst) {
@@ -1563,6 +1709,46 @@ function propagateSatelliteRecord(record, date, gmst) {
     if (!hasFiniteNumbers(longitude, latitude, altitudeMeters)) return null;
 
     return CesiumLib.Cartesian3.fromDegrees(longitude, latitude, altitudeMeters);
+}
+
+function setAllSatelliteAnimatedTarget(record, position, startAt = Date.now(), endAt = startAt) {
+    if (!record || !record.point || !position) return;
+
+    const currentPosition = hasValidCartesian(record.point.position)
+        ? CesiumLib.Cartesian3.clone(record.point.position)
+        : CesiumLib.Cartesian3.clone(position);
+
+    record.animationFromPosition = currentPosition;
+    record.animationToPosition = CesiumLib.Cartesian3.clone(position);
+    record.animationStartAt = startAt;
+    record.animationEndAt = Math.max(endAt, startAt);
+    record.tracePositionsCache = null;
+    record.tracePositionsCacheAt = 0;
+    record.point.position = currentPosition;
+}
+
+function updateAllSatelliteAnimatedPositions(now = Date.now()) {
+    if (!allSatellitePointCollection || allSatelliteRecords.length === 0) return;
+
+    const scratch = new CesiumLib.Cartesian3();
+    allSatelliteRecords.forEach(record => {
+        if (!record.point || !record.hasPosition || !record.animationToPosition) return;
+
+        if (!record.animationFromPosition || record.animationEndAt <= record.animationStartAt) {
+            record.point.position = record.animationToPosition;
+            return;
+        }
+
+        const progress = clamp(
+            (now - record.animationStartAt) / (record.animationEndAt - record.animationStartAt),
+            0,
+            1
+        );
+
+        record.point.position = progress >= 1
+            ? record.animationToPosition
+            : CesiumLib.Cartesian3.lerp(record.animationFromPosition, record.animationToPosition, progress, scratch);
+    });
 }
 
 function getSatrecOrbitPeriodMinutes(satrec, fallbackMinutes = SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES) {
@@ -1607,10 +1793,48 @@ function buildFullOrbitPositionsFromSatrec(satrec, fallbackPeriodMinutes = SATEL
     return positions;
 }
 
-function buildAllSatelliteTracePositions(record) {
+function buildAllSatelliteTracePositions(record, now = Date.now(), currentPosition = null) {
     if (!record || !record.satrec) return [];
 
-    return buildFullOrbitPositionsFromSatrec(record.satrec);
+    const positions = [];
+    const livePosition = currentPosition || (record.point && hasValidCartesian(record.point.position)
+        ? CesiumLib.Cartesian3.clone(record.point.position)
+        : null);
+
+    if (livePosition) {
+        positions.push(livePosition);
+    }
+
+    const periodMinutes = getSatrecOrbitPeriodMinutes(record.satrec, SATELLITE_FALLBACK_ORBIT_PERIOD_MINUTES);
+    const stepMinutes = getFullOrbitStepMinutes(periodMinutes);
+
+    for (let minute = stepMinutes; minute <= periodMinutes; minute += stepMinutes) {
+        const date = new Date(now + minute * 60 * 1000);
+        const position = propagateSatelliteRecord(record, date, getSatelliteGmst(date));
+        if (position) {
+            positions.push(position);
+        }
+    }
+
+    const endDate = new Date(now + periodMinutes * 60 * 1000);
+    const endPosition = propagateSatelliteRecord(record, endDate, getSatelliteGmst(endDate));
+    if (endPosition) {
+        positions.push(endPosition);
+    }
+
+    return positions;
+}
+
+function getAllSatelliteTracePositions(record, refreshMs = ALL_SATELLITE_TRACE_REFRESH_MS, now = Date.now()) {
+    if (!record) return [];
+    if (record.tracePositionsCache && now - (record.tracePositionsCacheAt || 0) < refreshMs) {
+        return record.tracePositionsCache;
+    }
+
+    const positions = buildAllSatelliteTracePositions(record, now);
+    record.tracePositionsCache = positions;
+    record.tracePositionsCacheAt = now;
+    return positions;
 }
 
 function clearAllSatelliteTrace() {
@@ -1756,7 +1980,7 @@ async function refreshVisibleTrackedSatelliteOrbits() {
 function showAllSatelliteTrace(record) {
     selectedAllSatelliteRecord = record;
     const visible = record && record.hasPosition && isAllSatelliteCategoryVisible(record.category);
-    const positions = visible ? buildAllSatelliteTracePositions(record) : [];
+    const positions = visible ? getAllSatelliteTracePositions(record, ALL_SATELLITE_SELECTED_TRACE_REFRESH_MS) : [];
 
     if (positions.length < 2) {
         if (allSatelliteTraceEntity) {
@@ -1771,7 +1995,11 @@ function showAllSatelliteTrace(record) {
             name: `Satellitspor: ${record.name}`,
             show: true,
             polyline: {
-                positions,
+                positions: new CesiumLib.CallbackProperty(() => (
+                    selectedAllSatelliteRecord === record && record.hasPosition && isAllSatelliteCategoryVisible(record.category)
+                        ? getAllSatelliteTracePositions(record, ALL_SATELLITE_SELECTED_TRACE_REFRESH_MS)
+                        : []
+                ), false),
                 arcType: CesiumLib.ArcType.NONE,
                 width: ALL_SATELLITE_TRACE_WIDTH,
                 material: new CesiumLib.PolylineGlowMaterialProperty({
@@ -1786,7 +2014,11 @@ function showAllSatelliteTrace(record) {
 
     allSatelliteTraceEntity.name = `Satellitspor: ${record.name}`;
     allSatelliteTraceEntity.description = formatAllSatelliteDetails(record);
-    allSatelliteTraceEntity.polyline.positions = positions;
+    allSatelliteTraceEntity.polyline.positions = new CesiumLib.CallbackProperty(() => (
+        selectedAllSatelliteRecord === record && record.hasPosition && isAllSatelliteCategoryVisible(record.category)
+            ? getAllSatelliteTracePositions(record, ALL_SATELLITE_SELECTED_TRACE_REFRESH_MS)
+            : []
+    ), false);
     allSatelliteTraceEntity.polyline.arcType = CesiumLib.ArcType.NONE;
     allSatelliteTraceEntity.polyline.material = new CesiumLib.PolylineGlowMaterialProperty({
         glowPower: 0.12,
@@ -1814,13 +2046,17 @@ function refreshAllVisibleSatelliteTraces() {
     }
 
     getTraceableVisibleSatelliteRecords().forEach(record => {
-        const positions = buildAllSatelliteTracePositions(record);
+        const positions = getAllSatelliteTracePositions(record);
         if (positions.length < 2) return;
 
         allVisibleSatelliteTraceEntities.push(viewer.entities.add({
             name: `Satellitspor: ${record.name}`,
             polyline: {
-                positions,
+                positions: new CesiumLib.CallbackProperty(() => (
+                    record.hasPosition && isAllSatelliteCategoryVisible(record.category)
+                        ? getAllSatelliteTracePositions(record)
+                        : []
+                ), false),
                 arcType: CesiumLib.ArcType.NONE,
                 width: 1,
                 material: getAllSatelliteColor(record).withAlpha(0.24)
@@ -1832,7 +2068,13 @@ function refreshAllVisibleSatelliteTraces() {
     updateSatelliteControlPanel();
 }
 
-function updateAllSatellitesLayer(startIndex = 0, date = new Date(), gmst = getSatelliteGmst(date)) {
+function updateAllSatellitesLayer(
+    startIndex = 0,
+    date = new Date(),
+    gmst = getSatelliteGmst(date),
+    transitionStartAt = Date.now(),
+    transitionEndAt = transitionStartAt
+) {
     if (!allSatellitePointCollection || allSatelliteRecords.length === 0) return;
 
     const endIndex = Math.min(startIndex + ALL_SATELLITES_BATCH_SIZE, allSatelliteRecords.length);
@@ -1840,7 +2082,7 @@ function updateAllSatellitesLayer(startIndex = 0, date = new Date(), gmst = getS
         const record = allSatelliteRecords[i];
         const position = propagateSatelliteRecord(record, date, gmst);
         if (position && record.point) {
-            record.point.position = position;
+            setAllSatelliteAnimatedTarget(record, position, transitionStartAt, transitionEndAt);
             record.hasPosition = true;
             record.point.show = isAllSatelliteCategoryVisible(record.category);
         } else if (record.point) {
@@ -1850,10 +2092,17 @@ function updateAllSatellitesLayer(startIndex = 0, date = new Date(), gmst = getS
     }
 
     if (endIndex < allSatelliteRecords.length) {
-        window.requestAnimationFrame(() => updateAllSatellitesLayer(endIndex, date, gmst));
+        window.requestAnimationFrame(() => updateAllSatellitesLayer(
+            endIndex,
+            date,
+            gmst,
+            transitionStartAt,
+            transitionEndAt
+        ));
         return;
     }
 
+    updateAllSatelliteAnimatedPositions(transitionStartAt);
     setDataStatus('status-tle', 'ok', `${allSatelliteRecords.length} sat`);
     refreshAllSatelliteTrace();
 }
@@ -1862,7 +2111,9 @@ function scheduleAllSatellitesUpdate() {
     window.clearInterval(allSatellitesUpdateTimer);
     allSatellitesUpdateTimer = window.setInterval(() => {
         if (isLayerChecked('toggle-all-satellites')) {
-            updateAllSatellitesLayer();
+            const now = Date.now();
+            const date = new Date(now);
+            updateAllSatellitesLayer(0, date, getSatelliteGmst(date), now, now + ALL_SATELLITES_UPDATE_INTERVAL_MS);
         }
     }, ALL_SATELLITES_UPDATE_INTERVAL_MS);
 }
@@ -1889,7 +2140,13 @@ async function loadAllSatellitesLayer() {
                         category: getAllSatelliteCategory(record),
                         satelliteType: getAllSatelliteType(record),
                         hasPosition: false,
-                        point: null
+                        point: null,
+                        animationFromPosition: null,
+                        animationToPosition: null,
+                        animationStartAt: 0,
+                        animationEndAt: 0,
+                        tracePositionsCache: null,
+                        tracePositionsCacheAt: 0
                     };
                 } catch (e) {
                     return null;
@@ -1908,15 +2165,29 @@ async function loadAllSatellitesLayer() {
                 position: CesiumLib.Cartesian3.ZERO,
                 pixelSize: ALL_SATELLITES_POINT_SIZE,
                 color: getAllSatelliteColor(record),
-                outlineColor: CesiumLib.Color.BLACK.withAlpha(0.7),
+                outlineColor: getAllSatelliteOutlineColor(record),
                 outlineWidth: 1,
+                scaleByDistance: new CesiumLib.NearFarScalar(
+                    ALL_SATELLITES_NEAR_DISTANCE_M,
+                    ALL_SATELLITES_NEAR_SCALE,
+                    ALL_SATELLITES_FAR_DISTANCE_M,
+                    ALL_SATELLITES_FAR_SCALE
+                ),
+                translucencyByDistance: new CesiumLib.NearFarScalar(
+                    ALL_SATELLITES_NEAR_DISTANCE_M,
+                    ALL_SATELLITES_NEAR_ALPHA,
+                    ALL_SATELLITES_FAR_DISTANCE_M,
+                    ALL_SATELLITES_FAR_ALPHA
+                ),
                 id: { allSatelliteRecord: record },
                 show: false
             });
         });
 
         allSatellitePointCollection.show = isLayerChecked('toggle-all-satellites');
-        updateAllSatellitesLayer();
+        const now = Date.now();
+        const date = new Date(now);
+        updateAllSatellitesLayer(0, date, getSatelliteGmst(date), now, now);
         scheduleAllSatellitesUpdate();
     } catch (error) {
         setDataStatus('status-tle', 'error', 'Fejl');
@@ -2445,6 +2716,42 @@ function getPlaneAltitudeColor(altitudeMeters) {
 function getPlaneBillboardRotation(headingDegrees) {
     if (!hasFiniteNumbers(headingDegrees)) return 0;
     return -Cesium.Math.toRadians(Number(headingDegrees));
+}
+
+function predictFlightPosition(lonDegrees, latDegrees, altitudeMeters, headingDegrees, velocityMs, secondsAhead) {
+    if (!hasFiniteNumbers(lonDegrees, latDegrees, altitudeMeters, headingDegrees, velocityMs, secondsAhead)) {
+        return null;
+    }
+
+    const distanceMeters = Math.max(Number(velocityMs), 0) * Math.max(Number(secondsAhead), 0);
+    const nextPoint = getPointAtBearing(lonDegrees, latDegrees, headingDegrees, distanceMeters);
+    return CesiumLib.Cartesian3.fromDegrees(nextPoint.lon, nextPoint.lat, Math.max(Number(altitudeMeters), 0));
+}
+
+function createPlanePositionProperty(now, position, lon, lat, altitude, heading, velocityMs) {
+    const positionProperty = new CesiumLib.SampledPositionProperty();
+    positionProperty.setInterpolationOptions({
+        interpolationDegree: 1,
+        interpolationAlgorithm: CesiumLib.LinearApproximation
+    });
+    positionProperty.forwardExtrapolationType = CesiumLib.ExtrapolationType.HOLD;
+    positionProperty.forwardExtrapolationDuration = FLIGHT_MIN_REQUEST_GAP_MS / 1000;
+    positionProperty.addSample(now, position);
+
+    const predictedPosition = predictFlightPosition(
+        lon,
+        lat,
+        altitude,
+        heading,
+        velocityMs,
+        FLIGHT_MIN_REQUEST_GAP_MS / 1000
+    );
+    if (predictedPosition && hasValidCartesian(predictedPosition)) {
+        const futureTime = CesiumLib.JulianDate.addSeconds(now, FLIGHT_MIN_REQUEST_GAP_MS / 1000, new CesiumLib.JulianDate());
+        positionProperty.addSample(futureTime, predictedPosition);
+    }
+
+    return positionProperty;
 }
 
 function getPointAtBearing(lonDegrees, latDegrees, bearingDegrees, distanceMeters) {
@@ -3214,7 +3521,9 @@ async function updateFlights() {
             if (planeEntities.has(icao)) {
                 const plane = planeEntities.get(icao);
                 const entity = plane.entity;
-                plane.positionProperty.addSample(now, position);
+                const positionProperty = createPlanePositionProperty(now, position, lon, lat, altitude, heading, velocityMs);
+                entity.position = positionProperty;
+                plane.positionProperty = positionProperty;
                 plane.sampleCount += 1;
                 plane.lastSeen = Date.now();
                 entity.show = true;
@@ -3236,14 +3545,7 @@ async function updateFlights() {
                 return;
             }
 
-            const positionProperty = new CesiumLib.SampledPositionProperty();
-            positionProperty.setInterpolationOptions({
-                interpolationDegree: 1,
-                interpolationAlgorithm: CesiumLib.LinearApproximation
-            });
-            positionProperty.forwardExtrapolationType = CesiumLib.ExtrapolationType.HOLD;
-            positionProperty.forwardExtrapolationDuration = 20;
-            positionProperty.addSample(now, position);
+            const positionProperty = createPlanePositionProperty(now, position, lon, lat, altitude, heading, velocityMs);
 
             const entity = viewer.entities.add({
                 name: `Fly: ${callsign}`,
@@ -3504,18 +3806,66 @@ function initStaticWeatherZoneLayer() {
     });
 }
 
-function getWindColor(speedKnots) {
-    const speed = clamp(Number(speedKnots) || 0, 0, 55);
-    if (speed < 8) return Cesium.Color.fromCssColorString('#4fb7e8').withAlpha(0.32);
-    if (speed < 16) return Cesium.Color.fromCssColorString('#3fcf9c').withAlpha(0.34);
-    if (speed < 26) return Cesium.Color.fromCssColorString('#f0c84a').withAlpha(0.38);
-    if (speed < 38) return Cesium.Color.fromCssColorString('#e56b5d').withAlpha(0.42);
+function getWindColor(speedMetersPerSecond) {
+    const speed = clamp(Number(speedMetersPerSecond) || 0, 0, 25);
+    if (speed < 4) return Cesium.Color.fromCssColorString('#4fb7e8').withAlpha(0.32);
+    if (speed < 8) return Cesium.Color.fromCssColorString('#3fcf9c').withAlpha(0.34);
+    if (speed < 13) return Cesium.Color.fromCssColorString('#f0c84a').withAlpha(0.38);
+    if (speed < 20) return Cesium.Color.fromCssColorString('#e56b5d').withAlpha(0.42);
     return Cesium.Color.fromCssColorString('#b14bd8').withAlpha(0.48);
 }
 
-function getWindLineColor(speedKnots) {
-    const color = getWindColor(speedKnots);
+function getWindLineColor(speedMetersPerSecond) {
+    const color = getWindColor(speedMetersPerSecond);
     return new Cesium.Color(color.red, color.green, color.blue, 0.85);
+}
+
+let windArrowIcon = null;
+
+function getWindArrowIcon() {
+    if (windArrowIcon) return windArrowIcon;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 96;
+    canvas.height = 96;
+    const ctx = canvas.getContext('2d');
+
+    ctx.translate(48, 48);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.strokeStyle = 'rgba(8, 16, 24, 0.75)';
+    ctx.lineWidth = 13;
+    ctx.beginPath();
+    ctx.moveTo(0, 28);
+    ctx.lineTo(0, -18);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, -32);
+    ctx.lineTo(-14, -8);
+    ctx.lineTo(0, -16);
+    ctx.lineTo(14, -8);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(8, 16, 24, 0.75)';
+    ctx.fill();
+
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(0, 28);
+    ctx.lineTo(0, -18);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, -32);
+    ctx.lineTo(-14, -8);
+    ctx.lineTo(0, -16);
+    ctx.lineTo(14, -8);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+
+    windArrowIcon = canvas.toDataURL('image/png');
+    return windArrowIcon;
 }
 
 function destinationPoint(lonDegrees, latDegrees, bearingDegrees, distanceMeters) {
@@ -3547,28 +3897,24 @@ function clearWindLayer() {
 function renderWindLayer(samples, meta = {}) {
     const visible = isLayerChecked('toggle-weather');
     clearWindLayer();
+    const arrowImage = getWindArrowIcon();
 
     samples.forEach(sample => {
         if (!hasFiniteNumbers(sample.lon, sample.lat, sample.speed, sample.direction)) return;
 
         const speed = Number(sample.speed);
         const direction = Number(sample.direction);
+        const flowDirection = (direction + 180) % 360;
         const halfLat = Math.max(Number(sample.cellLatSpan || 1), 0.25) / 2;
         const halfLon = Math.max(Number(sample.cellLonSpan || 1), 0.25) / 2;
         const west = Number(sample.lon) - halfLon;
         const east = Number(sample.lon) + halfLon;
         const south = clamp(Number(sample.lat) - halfLat, -85, 85);
         const north = clamp(Number(sample.lat) + halfLat, -85, 85);
-        const arrowLength = clamp(
-            WIND_ARROW_BASE_LENGTH_M + speed * WIND_ARROW_SPEED_LENGTH_M,
-            WIND_ARROW_BASE_LENGTH_M,
-            WIND_MAX_ARROW_LENGTH_M
-        );
-        const end = destinationPoint(sample.lon, sample.lat, direction, arrowLength);
-        const label = `${formatNumber(speed, 0)} kn`;
+        const label = `${formatNumber(speed, 0)} m/s`;
         const description = [
             'Live vind',
-            `Vind: ${formatNumber(speed, 1)} kn`,
+            `Vind: ${formatNumber(speed, 1)} m/s`,
             `Retning: ${formatNumber(direction, 0)}°`,
             sample.time ? `Opdateret: ${sample.time}` : ''
         ].filter(Boolean).join('<br>');
@@ -3587,31 +3933,29 @@ function renderWindLayer(samples, meta = {}) {
         const arrow = viewer.entities.add({
             name: `Vindretning ${label}`,
             show: visible,
-            polyline: {
-                positions: Cesium.Cartesian3.fromDegreesArrayHeights([
-                    sample.lon,
-                    sample.lat,
-                    WIND_SAMPLE_HEIGHT_M,
-                    end[0],
-                    end[1],
-                    WIND_SAMPLE_HEIGHT_M
-                ]),
-                width: clamp(1.5 + speed / 14, 1.5, 5),
-                material: new Cesium.PolylineGlowMaterialProperty({
-                    glowPower: 0.14,
-                    color: getWindLineColor(speed)
-                }),
-                clampToGround: false
+            billboard: {
+                image: arrowImage,
+                color: getWindLineColor(speed),
+                scale: clamp(
+                    WIND_ARROW_MIN_SCALE + (speed / 20) * (WIND_ARROW_MAX_SCALE - WIND_ARROW_MIN_SCALE),
+                    WIND_ARROW_MIN_SCALE,
+                    WIND_ARROW_MAX_SCALE
+                ),
+                rotation: Cesium.Math.toRadians(flowDirection),
+                alignedAxis: Cesium.Cartesian3.ZERO,
+                verticalOrigin: Cesium.VerticalOrigin.CENTER,
+                heightReference: Cesium.HeightReference.NONE,
+                disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE
             },
             label: {
                 text: label,
-                font: '10pt sans-serif',
-                fillColor: Cesium.Color.WHITE,
-                outlineColor: Cesium.Color.BLACK,
-                outlineWidth: 3,
+                font: '9pt sans-serif',
+                fillColor: Cesium.Color.fromCssColorString('#eefcff'),
+                outlineColor: Cesium.Color.fromCssColorString('#081018'),
+                outlineWidth: 4,
                 style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-                pixelOffset: new Cesium.Cartesian2(0, -12),
-                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 3500000)
+                pixelOffset: new Cesium.Cartesian2(0, 20),
+                distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0, 2600000)
             },
             position: Cesium.Cartesian3.fromDegrees(sample.lon, sample.lat, WIND_SAMPLE_HEIGHT_M),
             description
@@ -4312,6 +4656,30 @@ viewer.camera.moveEnd.addEventListener(() => {
 // 9. HØJDEMÅLER LOGIK
 viewer.scene.postRender.addEventListener(() => {
     const now = performance.now();
+    updateKeyboardCameraNavigation();
+
+    if (now - lastAllSatelliteAnimationFrameAt >= ALL_SATELLITES_ANIMATION_FRAME_MS) {
+        updateAllSatelliteAnimatedPositions(Date.now());
+        lastAllSatelliteAnimationFrameAt = now;
+    }
+
+    if (
+        isVisibleSatelliteTraceEnabled() &&
+        isLayerChecked('toggle-all-satellites') &&
+        now - lastAllSatelliteTraceRefreshAt >= ALL_SATELLITE_TRACE_REFRESH_MS
+    ) {
+        refreshAllVisibleSatelliteTraces();
+        lastAllSatelliteTraceRefreshAt = now;
+    }
+
+    if (
+        selectedAllSatelliteRecord &&
+        now - lastSelectedAllSatelliteTraceRefreshAt >= ALL_SATELLITE_SELECTED_TRACE_REFRESH_MS
+    ) {
+        refreshAllSatelliteTrace();
+        lastSelectedAllSatelliteTraceRefreshAt = now;
+    }
+
     if (now - lastAltitudeDisplayUpdateAt < ALTITUDE_DISPLAY_UPDATE_MS) return;
 
     const cameraHeight = viewer.camera.positionCartographic.height;
@@ -4328,6 +4696,7 @@ viewer.scene.postRender.addEventListener(() => {
 
 // KØR ALT VED START
 initTabs();
+initKeyboardNavigation();
 loadWatchlist();
 viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
 initDetailPicking();
