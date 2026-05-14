@@ -1332,7 +1332,7 @@ async function fetchFlightData() {
     throw lastFailure || new Error('Ingen flydata-kilder svarede. Start proxyen med: node server.js');
 }
 
-function addSatelliteSample(sat, time, position, telemetry) {
+function addSatelliteSample(sat, time, position, telemetry = null) {
     if (!hasValidCartesian(position)) {
         console.warn('Springer ugyldig Cesium-position over:', sat.name, position);
         return;
@@ -1340,21 +1340,17 @@ function addSatelliteSample(sat, time, position, telemetry) {
 
     sat.posProperty.addSample(time, position);
     sat.sampleCount += 1;
-    sat.telemetry = telemetry;
+    if (telemetry) {
+        sat.telemetry = telemetry;
+    }
 
     if (sat.entity) {
         sat.entity.show = true;
         sat.entity.satelliteTraceReady = sat.sampleCount >= 3;
-        sat.entity.path.show = false;
     }
 
-    if (selectedSatelliteKey && satellites[selectedSatelliteKey] === sat) {
+    if (telemetry && selectedSatelliteKey && satellites[selectedSatelliteKey] === sat) {
         updateSatelliteInfoPanel(selectedSatelliteKey);
-        showTrackedSatelliteOrbit(selectedSatelliteKey);
-    }
-
-    if (isVisibleSatelliteTraceEnabled()) {
-        refreshVisibleTrackedSatelliteOrbits();
     }
 }
 
@@ -1431,6 +1427,10 @@ function setAllSatellitesVisible(visible) {
 
     if (visible && allSatelliteRecords.length === 0) {
         loadAllSatellitesLayer();
+    } else if (visible) {
+        scheduleAllSatellitesUpdate();
+    } else {
+        stopAllSatellitesUpdate();
     }
 
     updateAllSatelliteCategoryVisibility();
@@ -1627,12 +1627,6 @@ function updateSatelliteControlPanel() {
 }
 
 function updateTrackedSatelliteTraceVisibility() {
-    satelliteEntities.forEach(entity => {
-        if (entity.path) {
-            entity.path.show = false;
-        }
-    });
-
     if (
         selectedSatelliteKey &&
         (!isLayerChecked('toggle-sat') ||
@@ -1643,7 +1637,6 @@ function updateTrackedSatelliteTraceVisibility() {
         clearTrackedSatelliteOrbit();
     }
 
-    refreshVisibleTrackedSatelliteOrbits();
     updateSatelliteControlPanel();
 }
 
@@ -1890,45 +1883,6 @@ async function showTrackedSatelliteOrbit(key) {
     }
 
     selectedSatelliteKey = key;
-    const positions = await buildTrackedSatelliteOrbitPositions(key);
-    if (requestId !== selectedTrackedSatelliteOrbitRequestId || selectedSatelliteKey !== key) {
-        return;
-    }
-    if (positions.length < 2) {
-        if (selectedTrackedSatelliteOrbitEntity) {
-            selectedTrackedSatelliteOrbitEntity.show = false;
-        }
-        updateSatelliteControlPanel();
-        return;
-    }
-
-    if (!selectedTrackedSatelliteOrbitEntity) {
-        selectedTrackedSatelliteOrbitEntity = viewer.entities.add({
-            name: `Satellitbane: ${sat.name}`,
-            show: true,
-            polyline: {
-                positions,
-                arcType: CesiumLib.ArcType.NONE,
-                width: ALL_SATELLITE_TRACE_WIDTH + 1,
-                material: new CesiumLib.PolylineGlowMaterialProperty({
-                    glowPower: 0.14,
-                    color: sat.color.withAlpha(0.74)
-                })
-            },
-            description: sat.facts.join('<br>')
-        });
-    } else {
-        selectedTrackedSatelliteOrbitEntity.name = `Satellitbane: ${sat.name}`;
-        selectedTrackedSatelliteOrbitEntity.description = sat.facts.join('<br>');
-        selectedTrackedSatelliteOrbitEntity.polyline.positions = positions;
-        selectedTrackedSatelliteOrbitEntity.polyline.arcType = CesiumLib.ArcType.NONE;
-        selectedTrackedSatelliteOrbitEntity.polyline.material = new CesiumLib.PolylineGlowMaterialProperty({
-            glowPower: 0.14,
-            color: sat.color.withAlpha(0.74)
-        });
-        selectedTrackedSatelliteOrbitEntity.show = true;
-    }
-
     updateSatelliteControlPanel();
 }
 
@@ -1940,11 +1894,6 @@ function clearVisibleTrackedSatelliteOrbits() {
 async function refreshVisibleTrackedSatelliteOrbits() {
     const refreshId = ++visibleTrackedSatelliteOrbitRefreshId;
     clearVisibleTrackedSatelliteOrbits();
-    satelliteEntities.forEach(entity => {
-        if (entity.path) {
-            entity.path.show = false;
-        }
-    });
 
     if (!isVisibleSatelliteTraceEnabled() || !isLayerChecked('toggle-sat')) {
         updateSatelliteControlPanel();
@@ -3638,14 +3587,6 @@ function initSatellites() {
             label: { 
                 text: sat.name, font: '12pt sans-serif', 
                 pixelOffset: new CesiumLib.Cartesian2(0, -15)
-            },
-            path: {
-                show: false,
-                resolution: 1,
-                material: new CesiumLib.PolylineGlowMaterialProperty({ glowPower: 0.1, color: sat.color }),
-                width: 4,
-                leadTime: 0,
-                trailTime: 5400 // Viser ruten for de sidste 90 minutter
             }
         });
         satelliteEntities.push(sat.entity);
@@ -3671,49 +3612,36 @@ async function updateSatelliteData() {
     for (let key in satellites) {
         const sat = satellites[key];
         try {
-            if (sat.source === 'tle') {
-                let tle = findTLE(key);
-                if (!tle && Object.keys(tleCache).length === 0) {
-                    await loadTLEData();
-                    tle = findTLE(key);
-                }
-                if (!tle) {
-                    console.warn('TLE ikke fundet for satellit:', sat.name);
-                    continue;
-                }
+            let tle = findTLE(key);
+            if (!tle && Object.keys(tleCache).length === 0) {
+                await loadTLEData();
+                tle = findTLE(key);
+            }
+
+            if (tle) {
                 const satrec = SatelliteLib.twoline2satrec(tle.line1, tle.line2);
                 const nowDate = new Date();
-                const positionAndVelocity = SatelliteLib.propagate(satrec, nowDate);
-                if (!positionAndVelocity.position) {
+                const currentSample = propagateTrackedSatelliteSample(satrec, nowDate);
+                if (!currentSample) {
                     console.warn('Kunne ikke propagere position for:', sat.name);
                     continue;
                 }
-                if (!positionAndVelocity.velocity) {
-                    console.warn('Kunne ikke propagere hastighed for:', sat.name);
-                    continue;
+
+                addSatelliteSample(sat, now, currentSample.position, currentSample.telemetry);
+                for (
+                    let offsetSeconds = TRACKED_SATELLITE_SAMPLE_INTERVAL_SECONDS;
+                    offsetSeconds <= TRACKED_SATELLITE_LOOKAHEAD_SECONDS;
+                    offsetSeconds += TRACKED_SATELLITE_SAMPLE_INTERVAL_SECONDS
+                ) {
+                    const sampleDate = new Date(nowDate.getTime() + offsetSeconds * 1000);
+                    const futureSample = propagateTrackedSatelliteSample(satrec, sampleDate);
+                    if (!futureSample) continue;
+                    addSatelliteSample(
+                        sat,
+                        CesiumLib.JulianDate.addSeconds(now, offsetSeconds, new CesiumLib.JulianDate()),
+                        futureSample.position
+                    );
                 }
-                const gmst = getSatelliteGmst(nowDate);
-                const positionGd = SatelliteLib.eciToGeodetic(positionAndVelocity.position, gmst);
-                const longitude = SatelliteLib.degreesLong(positionGd.longitude);
-                const latitude = SatelliteLib.degreesLat(positionGd.latitude);
-                const altitude = positionGd.height;
-                const velocity = positionAndVelocity.velocity;
-                const speedKmh = Math.sqrt(
-                    velocity.x * velocity.x +
-                    velocity.y * velocity.y +
-                    velocity.z * velocity.z
-                ) * 3600;
-                if (!hasFiniteNumbers(longitude, latitude, altitude, speedKmh)) {
-                    console.warn('Ugyldig TLE-position for:', sat.name, { longitude, latitude, altitude, speedKmh });
-                    continue;
-                }
-                const position = CesiumLib.Cartesian3.fromDegrees(longitude, latitude, altitude * 1000);
-                addSatelliteSample(sat, now, position, {
-                    altitudeKm: altitude,
-                    speedKmh,
-                    latitude,
-                    longitude
-                });
             } else {
                 const response = await fetch(`https://api.wheretheiss.at/v1/satellites/${sat.id}`);
                 if (response.ok) {
