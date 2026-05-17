@@ -114,6 +114,19 @@
         .status-ok .status-dot { background: #00ff88; }
         .status-warn .status-dot { background: #f6c400; }
         .status-error .status-dot { background: #ff4d4d; }
+        .status-alert {
+            margin-top: 8px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            line-height: 1.4;
+            border: 1px solid transparent;
+        }
+        .status-alert.hidden { display: none; }
+        .status-alert.info { background: rgba(0, 255, 204, 0.1); color: #d0ffe2; border-color: rgba(0,255,204,0.35); }
+        .status-alert.warn { background: rgba(246, 196, 0, 0.12); color: #fff4ce; border-color: rgba(246,196,0,0.35); }
+        .status-alert.error { background: rgba(255, 77, 77, 0.12); color: #ffdbda; border-color: rgba(255,77,77,0.35); }
+        .disabled-toggle { opacity: 0.55; pointer-events: none; }
         .watchlist-item { cursor: pointer; }
         .watchlist-item:hover { background: rgba(0,255,204,0.14); }
         .watchlist-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

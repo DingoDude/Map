@@ -2619,9 +2619,30 @@ function focusSearchItem(item) {
     if (item.type === 'Skib') {
         flyToShipEntity(item.entity);
     } else {
+        const position = getEntityPosition(item.entity);
         viewer.trackedEntity = undefined;
-        viewer.flyTo(item.entity);
+
+        if (hasValidCartesian(position)) {
+            viewer.camera.flyToBoundingSphere(
+                new Cesium.BoundingSphere(position, 1000),
+                {
+                    offset: new Cesium.HeadingPitchRange(
+                        viewer.camera.heading,
+                        Cesium.Math.toRadians(-45),
+                        1800000
+                    ),
+                    duration: 1.2,
+                    complete: refreshVisibleSideScope
+                }
+            );
+        } else {
+            viewer.flyTo(item.entity, {
+                duration: 1.2,
+                complete: refreshVisibleSideScope
+            });
+        }
     }
+
     if (item.entity.liveCameraData) {
         showLiveCameraPanel(item.entity.liveCameraData);
         return;
@@ -3360,6 +3381,7 @@ function connectAIS() {
 
     if (!AIS_API_KEY) {
         setDataStatus('status-ais', 'error', 'Mangler key');
+        showGlobalStatusMessage('AIS er deaktiveret: Mangler API-nøgle', 'error');
         console.warn('AIS API key mangler.');
         return;
     }
@@ -3370,6 +3392,7 @@ function connectAIS() {
 
     aisSocket.addEventListener('open', () => {
         updateAisLiveStatus('ok', 'Forbundet');
+        clearGlobalStatusMessage();
         aisLastScopeKey = '';
         sendAisSubscription(true);
     });
@@ -3398,11 +3421,13 @@ function connectAIS() {
 
         aisSocket = null;
         updateAisLiveStatus('warn', 'Genopretter');
+        showGlobalStatusMessage('AIS genopretter forbindelse...', 'warn');
         aisReconnectTimer = window.setTimeout(connectAIS, AIS_RECONNECT_MS);
     });
 
     aisSocket.addEventListener('error', error => {
         setDataStatus('status-ais', 'error', 'Fejl');
+        showGlobalStatusMessage('AIS-forbindelse fejlede. Se status for detaljer.', 'error');
         console.warn('AISStream fejl:', error);
     });
 }
@@ -4111,22 +4136,51 @@ function addLiveCameraEntity(camera) {
 async function loadExtraLiveCameras() {
     try {
         const response = await fetch(`/api/live-cameras?limit=${EXTRA_LIVE_CAMERA_LIMIT}`);
-        if (!response.ok) throw new Error(`Live camera API svarede ${response.status}`);
-        const data = await response.json();
-        const cameras = Array.isArray(data.cameras) ? data.cameras : [];
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (error) {
+            data = null;
+        }
+
+        if (!response.ok) {
+            const reason = data && data.meta && data.meta.reason ? data.meta.reason : `HTTP ${response.status}`;
+            const message = `Live kamera API svarede ${reason}`;
+            setDataStatus('status-live-cameras', 'error', reason);
+            showGlobalStatusMessage(message, 'error');
+            console.warn('Ekstra live-kameraer ikke hentet:', message);
+            return;
+        }
+
+        const cameras = Array.isArray(data && data.cameras) ? data.cameras : [];
         let added = 0;
 
         cameras.forEach(camera => {
             if (addLiveCameraEntity(camera)) added += 1;
         });
 
+        if (data && data.meta && data.meta.disabled) {
+            const reason = data.meta.reason || 'Deaktiveret';
+            setDataStatus('status-live-cameras', 'warn', reason);
+            showGlobalStatusMessage(`Live kameraer er ikke hentet: ${reason}`, 'warn');
+            console.info('Ekstra live-kameraer er ikke hentet:', reason);
+            return;
+        }
+
         if (added > 0) {
-            console.info(`Tilfojede ${added} ekstra live-kameraer fra ${data.meta && data.meta.source ? data.meta.source : 'ekstern kilde'}.`);
+            setDataStatus('status-live-cameras', 'ok', `${added} ekstra kameraer`);
+            showGlobalStatusMessage(`Tilføjede ${added} ekstra live-kameraer`, 'info');
+            window.setTimeout(clearGlobalStatusMessage, 8000);
             refreshVisibleSideScope();
-        } else if (data.meta && data.meta.disabled) {
-            console.info('Ekstra live-kameraer er ikke hentet:', data.meta.reason);
+        } else {
+            setDataStatus('status-live-cameras', 'warn', 'Ingen ekstra kameraer');
+            showGlobalStatusMessage('Kun indbyggede live-kameraer er tilgængelige.', 'warn');
+            window.setTimeout(clearGlobalStatusMessage, 7000);
         }
     } catch (error) {
+        const message = error && error.message ? error.message : 'Fejl';
+        setDataStatus('status-live-cameras', 'error', message);
+        showGlobalStatusMessage(`Live kameraer fejlede: ${message}`, 'error');
         console.warn('Fejl ved hentning af ekstra live-kameraer:', error);
     }
 }
@@ -4415,6 +4469,32 @@ function setCheckboxState(id, checked) {
         element.checked = checked;
         element.indeterminate = false;
     }
+}
+
+function setLayerToggleDisabled(id, disabled, reason = '') {
+    const element = document.getElementById(id);
+    if (!element) return;
+    element.disabled = disabled;
+    element.title = disabled && reason ? reason : '';
+    const label = element.closest('label');
+    if (label) {
+        label.classList.toggle('disabled-toggle', disabled);
+    }
+}
+
+function showGlobalStatusMessage(message, type = 'info') {
+    const alert = document.getElementById('status-alert');
+    if (!alert) return;
+    alert.classList.remove('hidden', 'info', 'warn', 'error');
+    alert.classList.add(type);
+    alert.textContent = message;
+}
+
+function clearGlobalStatusMessage() {
+    const alert = document.getElementById('status-alert');
+    if (!alert) return;
+    alert.classList.add('hidden');
+    alert.textContent = '';
 }
 
 function syncLayerGroupState(group) {

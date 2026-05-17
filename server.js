@@ -552,7 +552,17 @@ async function proxyLiveCameras(request, response) {
         });
 
         if (!windyResponse.ok) {
-            throw new Error(`Windy Webcams svarede ${windyResponse.status}`);
+            const errorReason = `Windy Webcams svarede ${windyResponse.status}`;
+            console.warn('Live camera proxy response error:', errorReason);
+            send(response, 200, JSON.stringify({
+                meta: {
+                    source: 'Windy Webcams',
+                    disabled: true,
+                    reason: errorReason
+                },
+                cameras: []
+            }), { 'Content-Type': 'application/json; charset=utf-8' });
+            return;
         }
 
         const payload = await windyResponse.json();
@@ -584,10 +594,11 @@ async function proxyLiveCameras(request, response) {
         });
     } catch (error) {
         console.error('Live camera proxy error:', error);
-        send(response, 502, JSON.stringify({
+        send(response, 200, JSON.stringify({
             meta: {
                 source: 'Windy Webcams',
-                error: 'Kunne ikke hente ekstra live-kameraer'
+                disabled: true,
+                reason: `Kunne ikke hente ekstra live-kameraer: ${error.message}`
             },
             cameras: []
         }), { 'Content-Type': 'application/json; charset=utf-8' });

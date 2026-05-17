@@ -54,14 +54,14 @@
                 <label class="layer-item layer-grandchild"><span>Vejr og jord</span><input type="checkbox" id="toggle-sat-earth"></label>
                 <label class="layer-item layer-grandchild"><span>Øvrige satellitter</span><input type="checkbox" id="toggle-sat-other"></label>
                 <label class="layer-item layer-child"><span>Lufthavne</span><input type="checkbox" id="toggle-airports" checked></label>
-                <label class="layer-item layer-child"><span>Flytrafik</span><input type="checkbox" id="toggle-planes"></label>
+                <label class="layer-item layer-child"><span>Flytrafik</span><input type="checkbox" id="toggle-planes" checked></label>
             </div>
         </div>
         <div class="layer-group">
             <div class="layer-list">
                 <label class="layer-item layer-parent"><span>Vand</span><input type="checkbox" id="toggle-water"></label>
                 <label class="layer-item layer-child"><span>Civile havne</span><input type="checkbox" id="toggle-ships" checked></label>
-                <label class="layer-item layer-child"><span>Skibstrafik</span><input type="checkbox" id="toggle-ship-traffic"></label>
+                <label class="layer-item layer-child"><span>Skibstrafik</span><input type="checkbox" id="toggle-ship-traffic" checked></label>
                 <label class="layer-item layer-child"><span>Militær flåde</span><input type="checkbox" id="toggle-military"></label>
             </div>
         </div>
@@ -76,7 +76,7 @@
         <div class="layer-group">
             <div class="layer-list">
                 <label class="layer-item layer-parent"><span>Live video</span><input type="checkbox" id="toggle-live"></label>
-                <label class="layer-item layer-child"><span>Live kameraer</span><input type="checkbox" id="toggle-live-cameras" checked></label>
+                <label class="layer-item layer-child"><span>Live kameraer</span><input type="checkbox" id="toggle-live-cameras"></label>
             </div>
         </div>
     </div>
@@ -116,8 +116,10 @@
             <div class="status-item status-warn" id="status-ais"><span><span class="status-dot"></span>AIS</span><span>Starter</span></div>
             <div class="status-item status-warn" id="status-flights"><span><span class="status-dot"></span>Flydata</span><span>Venter</span></div>
             <div class="status-item status-warn" id="status-airports"><span><span class="status-dot"></span>Lufthavne</span><span>Venter</span></div>
+            <div class="status-item status-warn" id="status-live-cameras"><span><span class="status-dot"></span>Live kameraer</span><span>Venter</span></div>
             <div class="status-item status-warn" id="status-tle"><span><span class="status-dot"></span>TLE</span><span>Venter</span></div>
         </div>
+        <div id="status-alert" class="status-alert hidden"></div>
     </div>
 </div>
 
