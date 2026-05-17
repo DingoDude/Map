@@ -36,6 +36,16 @@ const tleCache = new Map();
 let airportCache = null;
 let openSkyRateLimitedUntil = 0;
 
+// Health check tracking
+const healthMetrics = {
+  ais: { ok: false, latency: 0, lastCheck: 0 },
+  flights: { ok: false, latency: 0, lastCheck: 0 },
+  tle: { ok: false, latency: 0, lastCheck: 0 },
+  wind: { ok: false, latency: 0, lastCheck: 0 },
+  airports: { ok: false, latency: 0, lastCheck: 0 },
+  earthquakes: { ok: false, latency: 0, lastCheck: 0 }
+};
+
 function loadDotEnv() {
     const envPath = path.join(ROOT, '.env');
     try {
@@ -86,6 +96,19 @@ function sendRuntimeConfig(response) {
         .join('\n');
     send(response, 200, `${body}\n`, {
         'Content-Type': 'text/javascript; charset=utf-8'
+    });
+}
+
+function handleHealth(request, response) {
+    const health = {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        services: healthMetrics
+    };
+    
+    send(response, 200, JSON.stringify(health, null, 2), {
+        'Content-Type': 'application/json; charset=utf-8'
     });
 }
 
@@ -648,6 +671,11 @@ const server = http.createServer((request, response) => {
 
     if (request.url.startsWith('/api/tle')) {
         proxyTle(request, response);
+        return;
+    }
+
+    if (request.url.startsWith('/api/health')) {
+        handleHealth(request, response);
         return;
     }
 

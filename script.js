@@ -2067,6 +2067,14 @@ function scheduleAllSatellitesUpdate() {
     }, ALL_SATELLITES_UPDATE_INTERVAL_MS);
 }
 
+function stopAllSatellitesUpdate() {
+    try {
+        window.clearInterval(allSatellitesUpdateTimer);
+    } finally {
+        allSatellitesUpdateTimer = null;
+    }
+}
+
 async function loadAllSatellitesLayer() {
     if (isLoadingAllSatellites || allSatelliteRecords.length > 0) return;
 
@@ -4440,6 +4448,9 @@ function applyLayerSideEffects() {
     setWeatherVisible(isLayerChecked('toggle-weather'));
     setShipTrailsVisible(true);
     viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
+    if (typeof setCityLightsVisible === 'function') {
+        setCityLightsVisible(isLayerChecked('toggle-city-lights') && isLayerChecked('toggle-daynight'));
+    }
     refreshAllVisibleSatelliteTraces();
     updateSatelliteControlPanel();
 
@@ -4532,6 +4543,11 @@ addLayerToggleListener('toggle-weather', event => {
 });
 addLayerToggleListener('toggle-daynight', event => {
     viewer.scene.globe.enableLighting = event.target.checked;
+});
+addLayerToggleListener('toggle-city-lights', event => {
+    if (typeof setCityLightsVisible === 'function') {
+        setCityLightsVisible(event.target.checked && isLayerChecked('toggle-daynight'));
+    }
 });
 addLayerToggleListener('toggle-live-cameras', refreshVisibleSideScope);
 syncLayerGroupStates();
@@ -4636,6 +4652,12 @@ initWeatherLayer();
 initMaritimeLayers();
 initLiveCameras();
 initAirports();
+if (typeof initCityLights === 'function') {
+    initCityLights(viewer);
+    if (typeof setCityLightsVisible === 'function') {
+        setCityLightsVisible(isLayerChecked('toggle-city-lights') && isLayerChecked('toggle-daynight'));
+    }
+}
 restoreAisShipCache();
 if (isLayerChecked('toggle-ship-traffic')) {
     connectAIS();
