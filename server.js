@@ -6,6 +6,23 @@ const PORT = Number(process.env.PORT || 5600);
 const ROOT = __dirname;
 const OPEN_SKY_URL = 'https://opensky-network.org/api/states/all';
 const AIRPORTS_SOURCE_URL = 'https://davidmegginson.github.io/ourairports-data/airports.csv';
+const AIRPORT_FALLBACK_COLUMNS = [
+    'id', 'ident', 'type', 'name', 'latitude_deg', 'longitude_deg', 'elevation_ft',
+    'continent', 'iso_country', 'iso_region', 'municipality', 'scheduled_service',
+    'gps_code', 'iata_code', 'local_code', 'home_link', 'wikipedia_link', 'keywords'
+];
+const AIRPORT_FALLBACK_ROWS = [
+    ['', 'EKVG', 'medium_airport', 'Vágar Airport', '62.0636', '-7.2772', '280', 'EU', 'FO', 'FO-VA', 'Sørvágur / Vágar', 'yes', 'EKVG', 'FAE', '', '', '', 'Faroe Islands Færøerne Faeroe Faroes Vágar Vagar Sørvágur Sorvagur'],
+    ['', 'BGBW', 'medium_airport', 'Narsarsuaq Airport', '61.1605', '-45.4259', '112', 'NA', 'GL', 'GL-U-A', 'Narsarsuaq', 'yes', 'BGBW', 'UAK', '', '', '', 'Greenland Grønland'],
+    ['', 'BGGH', 'medium_airport', 'Nuuk Airport', '64.1909', '-51.6781', '283', 'NA', 'GL', 'GL-SM', 'Nuuk', 'yes', 'BGGH', 'GOH', '', '', '', 'Greenland Grønland'],
+    ['', 'BIKF', 'large_airport', 'Keflavík International Airport', '63.9850', '-22.6056', '171', 'EU', 'IS', 'IS-2', 'Reykjanesbær', 'yes', 'BIKF', 'KEF', '', '', '', 'Iceland Island Keflavik'],
+    ['', 'BIRK', 'medium_airport', 'Reykjavík Airport', '64.13', '-21.9406', '48', 'EU', 'IS', 'IS-1', 'Reykjavík', 'yes', 'BIRK', 'RKV', '', '', '', 'Iceland Island Reykjavik'],
+    ['', 'EGPO', 'medium_airport', 'Stornoway Airport', '58.2156', '-6.3311', '26', 'EU', 'GB', 'GB-SCT', 'Stornoway', 'yes', 'EGPO', 'SYY', '', '', '', 'Outer Hebrides Scotland'],
+    ['', 'EGPA', 'medium_airport', 'Kirkwall Airport', '58.9578', '-2.9050', '50', 'EU', 'GB', 'GB-SCT', 'Orkney', 'yes', 'EGPA', 'KOI', '', '', '', 'Orkney Scotland'],
+    ['', 'EGPB', 'medium_airport', 'Sumburgh Airport', '59.8789', '-1.2956', '20', 'EU', 'GB', 'GB-SCT', 'Shetland', 'yes', 'EGPB', 'LSI', '', '', '', 'Shetland Scotland'],
+    ['', 'EKRN', 'medium_airport', 'Bornholm Airport', '55.0633', '14.7596', '52', 'EU', 'DK', 'DK-84', 'Rønne', 'yes', 'EKRN', 'RNN', '', '', '', 'Bornholm Denmark Danmark Rønne Ronne'],
+    ['', 'EKBI', 'medium_airport', 'Billund Airport', '55.7403', '9.1518', '247', 'EU', 'DK', 'DK-83', 'Billund', 'yes', 'EKBI', 'BLL', '', '', '', 'Denmark Danmark']
+];
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const WINDY_WEBCAMS_URL = 'https://api.windy.com/webcams/api/v3/webcams';
 const TLE_SOURCES = {
@@ -66,6 +83,22 @@ const contentTypes = {
     '.jpeg': 'image/jpeg',
     '.svg': 'image/svg+xml'
 };
+
+function csvEscape(value) {
+    const text = String(value ?? '');
+    if (text.includes('"') || text.includes(',') || text.includes('\r') || text.includes('\n')) {
+        return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+}
+
+
+function createAirportFallbackCsv() {
+    return [
+        AIRPORT_FALLBACK_COLUMNS.join(','),
+        ...AIRPORT_FALLBACK_ROWS.map(row => row.map(csvEscape).join(','))
+    ].join('\n');
+}
 
 function send(response, statusCode, body, headers = {}) {
     response.writeHead(statusCode, {
@@ -271,9 +304,17 @@ async function proxyAirports(request, response) {
         send(response, airportCache.statusCode, airportCache.body, airportCache.headers);
     } catch (error) {
         console.error('Airport proxy error:', error);
-        send(response, 502, 'Kunne ikke hente lufthavnsdata.', {
-            'Content-Type': 'text/plain; charset=utf-8'
-        });
+        const body = createAirportFallbackCsv();
+        airportCache = {
+            statusCode: 200,
+            body,
+            headers: {
+                'Content-Type': 'text/csv; charset=utf-8',
+                'X-Airport-Data-Source': 'local-fallback'
+            },
+            expiresAt: now + FLIGHT_ERROR_CACHE_TTL_MS
+        };
+        send(response, airportCache.statusCode, airportCache.body, airportCache.headers);
     }
 }
 

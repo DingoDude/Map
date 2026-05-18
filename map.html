@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="da">
 <head>
     <meta charset="UTF-8">
@@ -68,9 +68,11 @@
         <div class="layer-group">
             <div class="layer-list">
                 <label class="layer-item layer-parent"><span>Natur og lys</span><input type="checkbox" id="toggle-nature-light"></label>
+                <label class="layer-item layer-child"><span>Landegr&#230;nser</span><input type="checkbox" id="toggle-country-borders" checked></label>
                 <label class="layer-item layer-child"><span>Jordskælv</span><input type="checkbox" id="toggle-quakes"></label>
                 <label class="layer-item layer-child"><span>Live vindkort</span><input type="checkbox" id="toggle-weather"></label>
                 <label class="layer-item layer-child"><span>Dag/nat</span><input type="checkbox" id="toggle-daynight"></label>
+                
             </div>
         </div>
         <div class="layer-group">
@@ -104,9 +106,10 @@
         <input id="filter-plane-altitude" type="number" min="0" step="1000" value="0">
         <label for="filter-airport-type">Lufthavne</label>
         <select id="filter-airport-type">
-            <option value="all">Alle store/top 1000</option>
+            <option value="all">Alle viste lufthavne</option>
             <option value="large_airport">Kun store</option>
             <option value="medium_airport">Store + mellemstore</option>
+            <option value="small_airport">Store + mellemstore + små</option>
         </select>
     </div>
 
@@ -146,12 +149,17 @@
     </div>
 
     <div id="satellite-control-panel">
-        <h3>Satellitkontrol</h3>
-        <label class="layer-item"><span>Trace for viste</span><input type="checkbox" id="toggle-visible-satellite-traces"></label>
-        <div class="sat-panel-row"><span>Synlige satellitter</span><span class="sat-panel-value" id="sat-panel-visible-count">0</span></div>
-        <div class="sat-panel-row"><span>Trace-ruter</span><span class="sat-panel-value" id="sat-panel-trace-count">0</span></div>
-        <button id="clear-satellite-trace" type="button">Ryd valgt trace</button>
-        <p class="sat-panel-note" id="sat-panel-note"></p>
+        <div class="sat-panel-header" id="sat-panel-header">
+            <h3>Satellitkontrol</h3>
+            <button class="minimize-button" id="minimize-sat-panel" aria-label="Minimér">▾</button>
+        </div>
+        <div class="sat-panel-body">
+            <label class="layer-item"><span>Trace for viste</span><input type="checkbox" id="toggle-visible-satellite-traces"></label>
+            <div class="sat-panel-row"><span>Synlige satellitter</span><span class="sat-panel-value" id="sat-panel-visible-count">0</span></div>
+            <div class="sat-panel-row"><span>Trace-ruter</span><span class="sat-panel-value" id="sat-panel-trace-count">0</span></div>
+            <button id="clear-satellite-trace" type="button">Ryd valgt trace</button>
+            <p class="sat-panel-note" id="sat-panel-note"></p>
+        </div>
     </div>
 
     <div id="detail-panel">

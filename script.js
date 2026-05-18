@@ -30,12 +30,40 @@ const FLIGHT_MIN_REQUEST_GAP_MS = 30000;
 const FLIGHT_RATE_LIMIT_BACKOFF_MS = 120000;
 const FLIGHT_GREEN_ALTITUDE_M = 10000;
 const FLIGHT_BLUE_ALTITUDE_M = 15000;
-const AIRPORT_MAX_RESULTS = 1000;
+const AIRPORT_MAX_RESULTS = 2500;
 const AIRPORT_TYPE_RANK = {
     large_airport: 0,
     medium_airport: 1,
     small_airport: 2
 };
+const CUSTOM_AIRPORTS = [
+    {
+        ident: 'EKVG',
+        type: 'medium_airport',
+        name: 'Vágar Airport',
+        latitude_deg: '62.0636',
+        longitude_deg: '-7.2772',
+        elevation_ft: '280',
+        continent: 'EU',
+        iso_country: 'FO',
+        iso_region: 'FO-VA',
+        municipality: 'Sørvágur / Vágar',
+        scheduled_service: 'yes',
+        gps_code: 'EKVG',
+        iata_code: 'FAE',
+        local_code: '',
+        keywords: 'Faroe Islands Færøerne Faeroe Faroes Vágar Vagar Sørvágur Sorvagur'
+    },
+    { ident: 'BGBW', type: 'medium_airport', name: 'Narsarsuaq Airport', latitude_deg: '61.1605', longitude_deg: '-45.4259', elevation_ft: '112', iso_country: 'GL', municipality: 'Narsarsuaq', scheduled_service: 'yes', gps_code: 'BGBW', iata_code: 'UAK', keywords: 'Greenland Grønland' },
+    { ident: 'BGGH', type: 'medium_airport', name: 'Nuuk Airport', latitude_deg: '64.1909', longitude_deg: '-51.6781', elevation_ft: '283', iso_country: 'GL', municipality: 'Nuuk', scheduled_service: 'yes', gps_code: 'BGGH', iata_code: 'GOH', keywords: 'Greenland Grønland' },
+    { ident: 'BIKF', type: 'large_airport', name: 'Keflavík International Airport', latitude_deg: '63.9850', longitude_deg: '-22.6056', elevation_ft: '171', iso_country: 'IS', municipality: 'Reykjanesbær', scheduled_service: 'yes', gps_code: 'BIKF', iata_code: 'KEF', keywords: 'Iceland Island Keflavik' },
+    { ident: 'BIRK', type: 'medium_airport', name: 'Reykjavík Airport', latitude_deg: '64.13', longitude_deg: '-21.9406', elevation_ft: '48', iso_country: 'IS', municipality: 'Reykjavík', scheduled_service: 'yes', gps_code: 'BIRK', iata_code: 'RKV', keywords: 'Iceland Island Reykjavik' },
+    { ident: 'EGPO', type: 'medium_airport', name: 'Stornoway Airport', latitude_deg: '58.2156', longitude_deg: '-6.3311', elevation_ft: '26', iso_country: 'GB', municipality: 'Stornoway', scheduled_service: 'yes', gps_code: 'EGPO', iata_code: 'SYY', keywords: 'Outer Hebrides Scotland' },
+    { ident: 'EGPA', type: 'medium_airport', name: 'Kirkwall Airport', latitude_deg: '58.9578', longitude_deg: '-2.9050', elevation_ft: '50', iso_country: 'GB', municipality: 'Orkney', scheduled_service: 'yes', gps_code: 'EGPA', iata_code: 'KOI', keywords: 'Orkney Scotland' },
+    { ident: 'EGPB', type: 'medium_airport', name: 'Sumburgh Airport', latitude_deg: '59.8789', longitude_deg: '-1.2956', elevation_ft: '20', iso_country: 'GB', municipality: 'Shetland', scheduled_service: 'yes', gps_code: 'EGPB', iata_code: 'LSI', keywords: 'Shetland Scotland' },
+    { ident: 'EKRN', type: 'medium_airport', name: 'Bornholm Airport', latitude_deg: '55.0633', longitude_deg: '14.7596', elevation_ft: '52', iso_country: 'DK', municipality: 'Rønne', scheduled_service: 'yes', gps_code: 'EKRN', iata_code: 'RNN', keywords: 'Bornholm Denmark Danmark Rønne Ronne' },
+    { ident: 'EKBI', type: 'medium_airport', name: 'Billund Airport', latitude_deg: '55.7403', longitude_deg: '9.1518', elevation_ft: '247', iso_country: 'DK', municipality: 'Billund', scheduled_service: 'yes', gps_code: 'EKBI', iata_code: 'BLL', keywords: 'Denmark Danmark' }
+];
 const ALWAYS_SHOW_BILLBOARD_DISTANCE = Number.POSITIVE_INFINITY;
 const SHIP_LABEL_MAX_DISTANCE_M = 1800000;
 const SHIP_LABEL_MAX_LENGTH = 20;
@@ -65,9 +93,14 @@ const WIND_ARROW_MAX_SCALE = 0.92;
 const WATCHLIST_KEY = 'space-control-watchlist-v1';
 const AIRPORT_LABEL_NEAR_DISTANCE_M = 900000;
 const AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M = 3500000;
+const AIRPORT_SMALL_MAX_CAMERA_HEIGHT_M = 950000;
 const PORT_MAX_CAMERA_HEIGHT_M = 5200000;
 const LIVE_CAMERA_MAX_CAMERA_HEIGHT_M = 9000000;
 const EXTRA_LIVE_CAMERA_LIMIT = 200;
+const COUNTRY_BORDERS_GEOJSON_URL = 'https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson';
+const COUNTRY_LABEL_MIN_CAMERA_HEIGHT_M = 300000;
+const COUNTRY_LABEL_MAX_CAMERA_HEIGHT_M = 14000000;
+const COUNTRY_LABEL_MIN_AREA = 6;
 const ALL_SATELLITES_TLE_URL = '/api/tle/active';
 const ALL_SATELLITES_UPDATE_INTERVAL_MS = 30000;
 const ALL_SATELLITES_BATCH_SIZE = 250;
@@ -137,6 +170,7 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
     shouldAnimate: true
 });
 
+
 viewer.scene.globe.depthTestAgainstTerrain = false;
 
 viewer.camera.setView({
@@ -151,12 +185,15 @@ const airportEntities = [];
 const militaryEntities = [];
 const weatherEntities = [];
 const liveCameraEntities = [];
+const countryLabelEntities = [];
 const liveShipEntities = new Map();
 const planeEntities = new Map();
 const searchableItems = [];
 const searchableByKey = new Map();
 let watchlist = [];
 let selectedDetailItem = null;
+let countryBordersDataSource = null;
+let countryBordersLineDataSource = null;
 
 // Konfiguration af satellitter
 const satellites = {
@@ -226,6 +263,264 @@ function getInputValue(id) {
 function normalizeSearchText(value) {
     return String(value || '').toLowerCase();
 }
+
+function toTitleCaseLabel(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/\b([a-zÀ-ÿ])/g, match => match.toUpperCase());
+}
+
+function extractCountryProperty(properties, keys) {
+    if (!properties) return '';
+    for (const key of keys) {
+        const property = properties[key];
+        if (!property) continue;
+        const value = typeof property.getValue === 'function'
+            ? property.getValue(viewer.clock.currentTime)
+            : property;
+        if (value) return String(value).trim();
+    }
+    return '';
+}
+
+function cartesianArrayToLonLatPoints(positions) {
+    return (positions || [])
+        .map(position => CesiumLib.Cartographic.fromCartesian(position))
+        .filter(Boolean)
+        .map(cartographic => ({
+            lon: CesiumLib.Math.toDegrees(cartographic.longitude),
+            lat: CesiumLib.Math.toDegrees(cartographic.latitude)
+        }))
+        .filter(point => hasFiniteNumbers(point.lon, point.lat));
+}
+
+function approximateLonLatArea(points) {
+    if (!points || points.length < 3) return 0;
+    const meanLatRad = points.reduce((sum, point) => sum + CesiumLib.Math.toRadians(point.lat), 0) / points.length;
+    const cosLat = Math.max(Math.cos(meanLatRad), 0.2);
+    let area = 0;
+    for (let index = 0; index < points.length; index += 1) {
+        const current = points[index];
+        const next = points[(index + 1) % points.length];
+        const x1 = current.lon * cosLat;
+        const y1 = current.lat;
+        const x2 = next.lon * cosLat;
+        const y2 = next.lat;
+        area += (x1 * y2) - (x2 * y1);
+    }
+    return Math.abs(area) / 2;
+}
+
+function getLabelAnchorFromPositions(positions) {
+    const points = cartesianArrayToLonLatPoints(positions);
+    if (points.length === 0) return null;
+
+    let west = 180;
+    let east = -180;
+    let south = 90;
+    let north = -90;
+
+    points.forEach(point => {
+        west = Math.min(west, point.lon);
+        east = Math.max(east, point.lon);
+        south = Math.min(south, point.lat);
+        north = Math.max(north, point.lat);
+    });
+
+    return {
+        lon: (west + east) / 2,
+        lat: (south + north) / 2,
+        area: approximateLonLatArea(points)
+    };
+}
+
+function buildCountryLabelCandidates(entities) {
+    const candidates = new Map();
+
+    entities.forEach(entity => {
+        if (!entity || !entity.polygon || !entity.polygon.hierarchy) return;
+
+        const name = extractCountryProperty(entity.properties, ['ADMIN', 'NAME_EN', 'NAME', 'name']);
+        if (!name) return;
+
+        const hierarchy = entity.polygon.hierarchy.getValue(viewer.clock.currentTime);
+        const anchor = hierarchy && hierarchy.positions ? getLabelAnchorFromPositions(hierarchy.positions) : null;
+        if (!anchor || !hasFiniteNumbers(anchor.lon, anchor.lat, anchor.area)) return;
+
+        if (anchor.area < COUNTRY_LABEL_MIN_AREA) return;
+
+        const key = normalizeSearchText(name);
+        const existing = candidates.get(key);
+        if (!existing || anchor.area > existing.area) {
+            const normalizedName = toTitleCaseLabel(name);
+            const displayName = anchor.area >= 28
+                ? normalizedName.toUpperCase()
+                : normalizedName;
+            candidates.set(key, {
+                name: normalizedName,
+                displayName,
+                lon: anchor.lon,
+                lat: anchor.lat,
+                area: anchor.area
+            });
+        }
+    });
+
+    return Array.from(candidates.values());
+}
+
+function toClosedGeoJsonRing(ring) {
+    if (!Array.isArray(ring) || ring.length < 2) return null;
+    const normalized = ring
+        .map(point => [Number(point && point[0]), Number(point && point[1])])
+        .filter(point => (
+            Number.isFinite(point[0]) &&
+            Number.isFinite(point[1]) &&
+            point[0] >= -180 && point[0] <= 180 &&
+            point[1] >= -90 && point[1] <= 90
+        ))
+        .filter((point, index, points) => {
+            if (index === 0) return true;
+            const previous = points[index - 1];
+            return previous[0] !== point[0] || previous[1] !== point[1];
+        });
+    if (normalized.length < 2) return null;
+    const first = normalized[0];
+    const last = normalized[normalized.length - 1];
+    if (!first || !last) return null;
+    if (first[0] !== last[0] || first[1] !== last[1]) {
+        normalized.push([first[0], first[1]]);
+    }
+    if (normalized.length < 4) return null;
+    return normalized;
+}
+
+function geometryToBorderFeatures(geometry, properties = {}) {
+    if (!geometry || !geometry.type || !geometry.coordinates) return [];
+
+    if (geometry.type === 'Polygon') {
+        const coordinates = geometry.coordinates
+            .map(toClosedGeoJsonRing)
+            .filter(Boolean);
+        return coordinates.length ? [{
+            type: 'Feature',
+            properties,
+            geometry: {
+                type: 'MultiLineString',
+                coordinates
+            }
+        }] : [];
+    }
+
+    if (geometry.type === 'MultiPolygon') {
+        const coordinates = geometry.coordinates
+            .flatMap(polygon => polygon.map(toClosedGeoJsonRing).filter(Boolean));
+        return coordinates.length ? [{
+            type: 'Feature',
+            properties,
+            geometry: {
+                type: 'MultiLineString',
+                coordinates
+            }
+        }] : [];
+    }
+
+    return [];
+}
+
+function buildCountryBorderFeatureCollection(geoJson) {
+    const features = Array.isArray(geoJson && geoJson.features) ? geoJson.features : [];
+    return {
+        type: 'FeatureCollection',
+        features: features.flatMap(feature => geometryToBorderFeatures(feature.geometry, feature.properties || {}))
+    };
+}
+
+function createCountryLabelEntity(country) {
+    const position = CesiumLib.Cartesian3.fromDegrees(country.lon, country.lat, 1000);
+    if (!hasValidCartesian(position)) return null;
+
+    const entity = viewer.entities.add({
+        name: country.name,
+        position,
+        label: {
+            text: country.displayName || country.name,
+            font: '600 19px "Segoe UI", "Noto Sans", sans-serif',
+            fillColor: CesiumLib.Color.WHITE.withAlpha(0.98),
+            outlineColor: CesiumLib.Color.fromCssColorString('#10171d').withAlpha(0.72),
+            outlineWidth: 2.4,
+            style: CesiumLib.LabelStyle.FILL_AND_OUTLINE,
+            horizontalOrigin: CesiumLib.HorizontalOrigin.CENTER,
+            verticalOrigin: CesiumLib.VerticalOrigin.CENTER,
+            pixelOffset: new CesiumLib.Cartesian2(0, -2),
+            disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE,
+            distanceDisplayCondition: new CesiumLib.DistanceDisplayCondition(0, 22000000),
+            scaleByDistance: new CesiumLib.NearFarScalar(1400000, 1.1, 18000000, 0.72)
+        }
+    });
+
+    entity.filterVisible = true;
+    entity.zoomVisible = true;
+    countryLabelEntities.push(entity);
+    return entity;
+}
+
+async function initCountryBorders() {
+    try {
+        const response = await fetch(COUNTRY_BORDERS_GEOJSON_URL);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const countryGeoJson = await response.json();
+        const borderGeoJson = buildCountryBorderFeatureCollection(countryGeoJson);
+
+        countryBordersDataSource = await CesiumLib.GeoJsonDataSource.load(countryGeoJson, {
+            stroke: CesiumLib.Color.WHITE.withAlpha(0.0),
+            fill: CesiumLib.Color.TRANSPARENT,
+            strokeWidth: 0,
+            clampToGround: false
+        });
+
+        countryBordersLineDataSource = await CesiumLib.GeoJsonDataSource.load(borderGeoJson, {
+            stroke: CesiumLib.Color.WHITE.withAlpha(0.82),
+            strokeWidth: 1.2,
+            clampToGround: false
+        });
+
+        countryBordersDataSource.entities.values.forEach(entity => {
+            if (!entity.polygon) return;
+            entity.polygon.material = CesiumLib.Color.TRANSPARENT;
+            entity.polygon.outline = false;
+            entity.polygon.height = 0;
+            entity.polygon.perPositionHeight = false;
+            entity.filterVisible = true;
+            entity.zoomVisible = true;
+        });
+
+        countryBordersLineDataSource.entities.values.forEach(entity => {
+            if (!entity.polyline) return;
+            entity.polyline.material = CesiumLib.Color.WHITE.withAlpha(0.82);
+            entity.polyline.width = 1.2;
+            entity.polyline.arcType = CesiumLib.ArcType.GEODESIC;
+            entity.polyline.clampToGround = false;
+            entity.filterVisible = true;
+            entity.zoomVisible = true;
+        });
+
+        viewer.dataSources.add(countryBordersLineDataSource);
+        viewer.dataSources.add(countryBordersDataSource);
+        countryBordersDataSource.show = false;
+
+        buildCountryLabelCandidates(countryBordersDataSource.entities.values).forEach(createCountryLabelEntity);
+        setCountryBordersVisible(isLayerChecked('toggle-country-borders'));
+        refreshVisibleSideScope();
+    } catch (error) {
+        console.warn('Kunne ikke indlaese landegraenser:', error);
+        showGlobalStatusMessage('Landegrænser kunne ikke indlæses.', 'warn');
+    }
+}
+
 
 function entityMatchesWatch(text) {
     const haystack = normalizeSearchText(text);
@@ -305,6 +600,7 @@ function applyVisibleSideScope() {
     setScopedEntityVisibility(quakeEntities, isLayerChecked('toggle-quakes'), occluder);
     setScopedEntityVisibility(shipEntities, isLayerChecked('toggle-ships'), occluder);
     setScopedEntityVisibility(airportEntities, isLayerChecked('toggle-airports'), occluder);
+    setScopedEntityVisibility(countryLabelEntities, isLayerChecked('toggle-country-borders'), occluder);
     setScopedEntityVisibility(liveShipEntities, isLayerChecked('toggle-ship-traffic'), occluder);
     setScopedEntityVisibility(planeEntities, isLayerChecked('toggle-planes'), occluder);
     setScopedEntityVisibility(militaryEntities, isLayerChecked('toggle-military'), occluder);
@@ -2067,6 +2363,14 @@ function scheduleAllSatellitesUpdate() {
     }, ALL_SATELLITES_UPDATE_INTERVAL_MS);
 }
 
+function stopAllSatellitesUpdate() {
+    window.clearInterval(allSatellitesUpdateTimer);
+    allSatellitesUpdateTimer = null;
+    if (allSatellitePointCollection) {
+        allSatellitePointCollection.show = false;
+    }
+}
+
 async function loadAllSatellitesLayer() {
     if (isLoadingAllSatellites || allSatelliteRecords.length > 0) return;
 
@@ -2172,10 +2476,7 @@ function applyFilters() {
     });
 
     airportEntities.forEach(entity => {
-        const type = entity.airportType || '';
-        entity.filterVisible = airportType === 'all' ||
-            type === 'large_airport' ||
-            (airportType === 'medium_airport' && type === 'medium_airport');
+        entity.filterVisible = airportTypeMatchesFilter(entity.airportType || '', airportType);
     });
 }
 
@@ -2183,7 +2484,10 @@ function updateZoomPriority() {
     const cameraHeight = viewer.camera.positionCartographic.height;
 
     airportEntities.forEach(entity => {
-        entity.zoomVisible = entity.airportType === 'large_airport' || cameraHeight <= AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M;
+        const type = entity.airportType || '';
+        entity.zoomVisible = type === 'large_airport' ||
+            (type === 'medium_airport' && cameraHeight <= AIRPORT_MEDIUM_MAX_CAMERA_HEIGHT_M) ||
+            (type === 'small_airport' && cameraHeight <= AIRPORT_SMALL_MAX_CAMERA_HEIGHT_M);
         if (entity.label) {
             entity.label.show = cameraHeight <= AIRPORT_LABEL_NEAR_DISTANCE_M;
         }
@@ -2195,6 +2499,11 @@ function updateZoomPriority() {
 
     liveCameraEntities.forEach(entity => {
         entity.zoomVisible = cameraHeight <= LIVE_CAMERA_MAX_CAMERA_HEIGHT_M;
+    });
+
+    countryLabelEntities.forEach(entity => {
+        entity.zoomVisible = cameraHeight >= COUNTRY_LABEL_MIN_CAMERA_HEIGHT_M &&
+            cameraHeight <= COUNTRY_LABEL_MAX_CAMERA_HEIGHT_M;
     });
 }
 
@@ -2425,6 +2734,9 @@ function createDetailImageElement(type) {
     } else if (normalizedType === 'skib') {
         image = SHIP_ICON;
         alt = 'Skib';
+    } else if (normalizedType === 'lufthavn') {
+        image = AIRPORT_ICON;
+        alt = 'Lufthavn';
     } else if (normalizedType === 'live cam' || normalizedType === 'live kamera') {
         image = CAMERA_ICON;
         alt = 'Live kamera';
@@ -4005,10 +4317,52 @@ function parseCsvRows(text) {
 }
 
 function airportSortScore(airport) {
+    const pinnedRank = airport.isCustomAirport ? -1000 : 0;
     const typeRank = AIRPORT_TYPE_RANK[airport.type] ?? 9;
     const scheduledRank = airport.scheduled_service === 'yes' ? 0 : 1;
     const iataRank = airport.iata_code ? 0 : 1;
-    return typeRank * 100 + scheduledRank * 10 + iataRank;
+    return pinnedRank + typeRank * 100 + scheduledRank * 10 + iataRank;
+}
+
+function normalizeAirportRecord(airport) {
+    return {
+        ...airport,
+        ident: airport.ident || airport.gps_code || airport.iata_code || airport.name,
+        keywords: airport.keywords || ''
+    };
+}
+
+function mergeCustomAirports(airports) {
+    const byIdent = new Map();
+
+    airports.forEach(airport => {
+        const normalized = normalizeAirportRecord(airport);
+        byIdent.set(normalizeSearchText(normalized.ident), normalized);
+    });
+
+    CUSTOM_AIRPORTS.forEach(airport => {
+        const normalized = normalizeAirportRecord({ ...airport, isCustomAirport: true });
+        const key = normalizeSearchText(normalized.ident);
+        byIdent.set(key, {
+            ...(byIdent.get(key) || {}),
+            ...normalized,
+            isCustomAirport: true
+        });
+    });
+
+    return Array.from(byIdent.values());
+}
+
+function getAirportBaseScale(type) {
+    if (type === 'large_airport') return 0.55;
+    if (type === 'medium_airport') return 0.42;
+    return 0.34;
+}
+
+function airportTypeMatchesFilter(type, airportTypeFilter) {
+    if (airportTypeFilter === 'all' || airportTypeFilter === 'small_airport') return true;
+    if (airportTypeFilter === 'large_airport') return type === 'large_airport';
+    return type === 'large_airport' || type === 'medium_airport';
 }
 
 async function initAirports() {
@@ -4026,8 +4380,8 @@ async function initAirports() {
         const headers = rows.shift();
         if (!headers) return;
 
-        const airports = rows
-            .map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] || ''])))
+        const airports = mergeCustomAirports(rows
+            .map(row => Object.fromEntries(headers.map((header, index) => [header, row[index] || '']))))
             .filter(airport => AIRPORT_TYPE_RANK[airport.type] !== undefined)
             .filter(airport => airport.type !== 'closed' && hasFiniteNumbers(airport.longitude_deg, airport.latitude_deg))
             .sort((a, b) => {
@@ -4045,6 +4399,7 @@ async function initAirports() {
             const municipality = airport.municipality || '-';
             const country = airport.iso_country || '-';
             const typeName = airport.type.replace('_', ' ');
+            const baseScale = getAirportBaseScale(airport.type);
             const position = Cesium.Cartesian3.fromDegrees(lon, lat, Math.max(elevationMeters, 0) + 25);
 
             if (!hasValidCartesian(position)) return;
@@ -4054,7 +4409,7 @@ async function initAirports() {
                 position,
                 billboard: {
                     image: AIRPORT_ICON,
-                    scale: airport.type === 'large_airport' ? 0.55 : 0.42,
+                    scale: baseScale,
                     disableDepthTestDistance: ALWAYS_SHOW_BILLBOARD_DISTANCE
                 },
                 label: {
@@ -4074,16 +4429,17 @@ async function initAirports() {
                     `Type: ${typeName}`,
                     `By: ${municipality}`,
                     `Land: ${country}`,
-                    `Højde: ${formatNumber(elevationMeters, 0)} m`
+                    `Højde: ${formatNumber(elevationMeters, 0)} m`,
+                    airport.isCustomAirport ? 'Kilde: prioriteret/lokal lufthavnsliste' : 'Kilde: OurAirports'
                 ].join('<br>')
             });
 
             entity.airportType = airport.type;
-            entity.baseScale = airport.type === 'large_airport' ? 0.55 : 0.42;
+            entity.baseScale = baseScale;
             entity.filterVisible = true;
             entity.zoomVisible = true;
             airportEntities.push(entity);
-            registerSearchItem('Lufthavn', entity.name, entity, `${iata} ${airport.ident} ${municipality} ${country} ${airport.type}`, entity.description, `airport:${airport.ident}`);
+            registerSearchItem('Lufthavn', entity.name, entity, `${iata} ${airport.ident} ${airport.gps_code || ''} ${municipality} ${country} ${airport.type} ${airport.keywords || ''}`, entity.description, `airport:${airport.ident}`);
         });
 
         refreshVisibleSideScope();
@@ -4455,7 +4811,7 @@ const layerGroups = [
     },
     {
         parentId: 'toggle-nature-light',
-        children: ['toggle-quakes', 'toggle-weather', 'toggle-daynight']
+        children: ['toggle-country-borders', 'toggle-quakes', 'toggle-weather', 'toggle-daynight']
     },
     {
         parentId: 'toggle-live',
@@ -4497,6 +4853,15 @@ function clearGlobalStatusMessage() {
     alert.textContent = '';
 }
 
+function setCountryBordersVisible(visible) {
+    if (countryBordersLineDataSource) {
+        countryBordersLineDataSource.show = visible;
+    }
+    countryLabelEntities.forEach(entity => {
+        entity.show = visible;
+    });
+}
+
 function syncLayerGroupState(group) {
     const parent = document.getElementById(group.parentId);
     if (!parent) return;
@@ -4518,6 +4883,7 @@ function applyLayerSideEffects() {
     refreshVisibleSideScope();
     setAllSatellitesVisible(isLayerChecked('toggle-all-satellites'));
     setWeatherVisible(isLayerChecked('toggle-weather'));
+    setCountryBordersVisible(isLayerChecked('toggle-country-borders'));
     setShipTrailsVisible(true);
     viewer.scene.globe.enableLighting = isLayerChecked('toggle-daynight');
     refreshAllVisibleSatelliteTraces();
@@ -4602,6 +4968,10 @@ addLayerToggleListener('toggle-planes', event => {
 });
 addLayerToggleListener('toggle-airports', refreshVisibleSideScope);
 addLayerToggleListener('toggle-military', refreshVisibleSideScope);
+addLayerToggleListener('toggle-country-borders', event => {
+    setCountryBordersVisible(event.target.checked);
+    refreshVisibleSideScope();
+});
 addLayerToggleListener('toggle-weather', event => {
     setWeatherVisible(event.target.checked);
     if (event.target.checked) {
@@ -4629,6 +4999,65 @@ addOptionalEventListener('clear-satellite-trace', 'click', () => {
 addOptionalEventListener('close-satellite-info', 'click', hideSatelliteInfoPanel);
 addOptionalEventListener('find-iss', 'click', () => flyToSat('iss'));
 addOptionalEventListener('find-tiangong', 'click', () => flyToSat('tiangong'));
+
+addOptionalEventListener('minimize-sat-panel', 'click', () => {
+    const panel = document.getElementById('satellite-control-panel');
+    if (!panel) return;
+    panel.classList.toggle('minimized');
+    const btn = document.getElementById('minimize-sat-panel');
+    if (btn) btn.textContent = panel.classList.contains('minimized') ? '▸' : '▾';
+});
+
+function initSatellitePanelDragging() {
+    const panel = document.getElementById('satellite-control-panel');
+    const handle = document.getElementById('sat-panel-header');
+    if (!panel || !handle) return;
+
+    let dragActive = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    function getPanelPosition() {
+        const rect = panel.getBoundingClientRect();
+        return { left: rect.left, top: rect.top };
+    }
+
+    function startDrag(event) {
+        if (event.target.closest('.minimize-button')) return;
+        dragActive = true;
+        const position = getPanelPosition();
+        offsetX = event.clientX - position.left;
+        offsetY = event.clientY - position.top;
+        panel.style.right = 'auto';
+        panel.style.left = `${position.left}px`;
+        panel.style.top = `${position.top}px`;
+        handle.setPointerCapture(event.pointerId);
+    }
+
+    function drag(event) {
+        if (!dragActive) return;
+        event.preventDefault();
+        const parentRect = panel.offsetParent ? panel.offsetParent.getBoundingClientRect() : document.documentElement.getBoundingClientRect();
+        let left = event.clientX - offsetX;
+        let top = event.clientY - offsetY;
+        left = Math.max(0, Math.min(left, parentRect.width - panel.offsetWidth));
+        top = Math.max(0, Math.min(top, parentRect.height - panel.offsetHeight));
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+    }
+
+    function stopDrag(event) {
+        dragActive = false;
+        handle.releasePointerCapture(event.pointerId);
+    }
+
+    handle.addEventListener('pointerdown', startDrag);
+    handle.addEventListener('pointermove', drag);
+    handle.addEventListener('pointerup', stopDrag);
+    handle.addEventListener('pointercancel', stopDrag);
+}
+
+initSatellitePanelDragging();
 
 ['filter-ship-speed', 'filter-ship-type', 'filter-plane-altitude', 'filter-airport-type'].forEach(id => {
     const element = document.getElementById(id);
@@ -4712,6 +5141,7 @@ initSatellites();
 if (isLayerChecked('toggle-quakes')) {
     initEarthquakes();
 }
+initCountryBorders();
 initWeatherLayer();
 initMaritimeLayers();
 initLiveCameras();

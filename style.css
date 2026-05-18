@@ -158,11 +158,27 @@
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
             display: none;
         }
-        #satellite-control-panel h3 { margin: 0 0 10px 0; color: #00ffcc; font-size: 16px; }
+        #satellite-control-panel .sat-panel-header {
+            display: flex; align-items: center; justify-content: space-between;
+            cursor: move; gap: 10px; user-select: none; margin-bottom: 10px;
+        }
+        #satellite-control-panel h3 { margin: 0; color: #00ffcc; font-size: 16px; }
+        #satellite-control-panel .minimize-button {
+            width: 28px; height: 24px; border: 0; background: transparent;
+            color: #cfe8ec; font-size: 14px; cursor: pointer; padding: 0; line-height: 18px;
+        }
         #satellite-control-panel .sat-panel-row {
             display: flex; align-items: center; justify-content: space-between; gap: 12px;
             padding: 7px 0; border-top: 1px solid rgba(255,255,255,0.12);
             font-size: 13px; color: #d8eef2;
+        }
+        #satellite-control-panel.minimized {
+            width: 140px; padding: 8px 10px; height: auto; overflow: visible;
+        }
+        #satellite-control-panel.minimized h3 { font-size: 13px; }
+        #satellite-control-panel.minimized .sat-panel-body { display: none; }
+        #satellite-control-panel.minimized .sat-panel-header {
+            margin-bottom: 0;
         }
         #satellite-control-panel .sat-panel-row:first-of-type { border-top: 0; }
         #satellite-control-panel .sat-panel-value { color: #ffffff; font-family: monospace; text-align: right; }
@@ -172,6 +188,12 @@
         #satellite-control-panel .layer-item {
             margin: 0 0 8px 0; background: rgba(255,255,255,0.06);
         }
+        /* Minimized state */
+        #satellite-control-panel.minimized {
+            width: 140px; padding: 8px 10px; height: auto; overflow: visible;
+        }
+        #satellite-control-panel.minimized h3 { font-size: 13px; }
+        #satellite-control-panel.minimized .sat-panel-body { display: none; }
 
         #detail-panel {
             position: absolute; right: 90px; bottom: 30px; width: 300px;

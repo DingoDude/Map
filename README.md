@@ -13,7 +13,7 @@ Fede features:
 - `Flytrafik`: live fly med callsign, kurs, højde og fart.
 - `Skibstrafik`: live AIS-skibe med kurs, fart og trail.
 - `Live vindkort`: vindfelter med pile, hvor større pil betyder mere vind.
-- `Lufthavne og live kameraer`: hurtige overlays til at orientere sig geografisk.
+- `Lufthavne og live kameraer`: udvidede lufthavns-overlays, inkl. Vágar Airport (FAE/EKVG) på Færøerne, og live kameraer til geografisk orientering.
 - `Tastatur-navigation`: pan med `W/A/S/D` og piletaster, zoom med `Q/E`, hurtigere med `Shift`.
 - `Søgning og watchlist`: find objekter hurtigt og hold øje med bestemte navne eller callsigns.
 
@@ -114,7 +114,7 @@ Watchlist gør det nemmere at fremhæve bestemte mål i kortet, fx:
 - `Rumstationer`: ISS og Tiangong.
 - `Alle satellitter`: alle aktive TLE-satellitter.
 - `Starlink / OneWeb / Navigation / Vejr og jord / Øvrige`: underfiltre til satellitlaget.
-- `Lufthavne`: store og mellemstore lufthavne.
+- `Lufthavne`: udvidet lufthavnskatalog med store, mellemstore og zoom-afhængige små lufthavne. Vágar Airport (FAE/EKVG) på Færøerne er prioriteret, så den vises selv ved fallback-data.
 - `Flytrafik`: live fly via OpenSky proxy.
 
 ### Vand
@@ -161,7 +161,7 @@ Det viser nu:
 - CelesTrak / Retlector
 - OpenSky Network
 - AISStream
-- OurAirports
+- OurAirports med lokal prioriteret fallback for udvalgte nordatlantiske og nordiske lufthavne
 - Open-Meteo
 - Windy Webcams
 - USGS
